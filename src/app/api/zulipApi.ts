@@ -35,7 +35,7 @@ export class ZulipApi {
     this.authHeader = 'Basic ' + btoa(`${email}:${apiKey}`);
   }
 
-  private async request<T>(
+  async request<T>(
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {

@@ -47,7 +47,9 @@ export function RichComposer({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const emojiBtnRef = useRef<HTMLDivElement>(null);
   const emojiRef = useRef<HTMLDivElement>(null);
+  const gifBtnRef = useRef<HTMLDivElement>(null);
   const gifRef = useRef<HTMLDivElement>(null);
 
   const editor = useEditor({
@@ -94,16 +96,25 @@ export function RichComposer({
   // Close pickers on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (emojiRef.current && !emojiRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        showEmojiPicker &&
+        emojiRef.current && !emojiRef.current.contains(target) &&
+        emojiBtnRef.current && !emojiBtnRef.current.contains(target)
+      ) {
         setShowEmojiPicker(false);
       }
-      if (gifRef.current && !gifRef.current.contains(e.target as Node)) {
+      if (
+        showGifPicker &&
+        gifRef.current && !gifRef.current.contains(target) &&
+        gifBtnRef.current && !gifBtnRef.current.contains(target)
+      ) {
         setShowGifPicker(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [showEmojiPicker, showGifPicker]);
 
   const handleSend = useCallback(async () => {
     if (!editor || sending) return;
@@ -215,7 +226,7 @@ export function RichComposer({
               </Tooltip>
 
               {/* Emoji picker */}
-              <div ref={emojiRef} className="relative">
+              <div ref={emojiBtnRef}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -234,15 +245,10 @@ export function RichComposer({
                   </TooltipTrigger>
                   <TooltipContent><p>Emoji</p></TooltipContent>
                 </Tooltip>
-                {showEmojiPicker && (
-                  <div className="absolute bottom-10 left-0 z-50">
-                    <EmojiPicker onSelect={handleEmojiSelect} />
-                  </div>
-                )}
               </div>
 
               {/* GIF picker */}
-              <div ref={gifRef} className="relative">
+              <div ref={gifBtnRef}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -261,11 +267,6 @@ export function RichComposer({
                   </TooltipTrigger>
                   <TooltipContent><p>GIF</p></TooltipContent>
                 </Tooltip>
-                {showGifPicker && (
-                  <div className="absolute bottom-10 left-0 z-50">
-                    <GifPicker onSelect={handleGifSelect} />
-                  </div>
-                )}
               </div>
 
               {/* Divider */}
@@ -439,6 +440,50 @@ export function RichComposer({
         className="hidden"
         onChange={handleFileSelect}
       />
+
+      {/* Emoji picker - rendered as fixed overlay above composer */}
+      {showEmojiPicker && (
+        <div
+          ref={emojiRef}
+          className="fixed z-[100]"
+          style={{
+            bottom: (() => {
+              const btn = emojiBtnRef.current;
+              if (!btn) return 80;
+              return window.innerHeight - btn.getBoundingClientRect().top + 8;
+            })(),
+            left: (() => {
+              const btn = emojiBtnRef.current;
+              if (!btn) return 260;
+              return btn.getBoundingClientRect().left;
+            })(),
+          }}
+        >
+          <EmojiPicker onSelect={handleEmojiSelect} />
+        </div>
+      )}
+
+      {/* GIF picker - rendered as fixed overlay above composer */}
+      {showGifPicker && (
+        <div
+          ref={gifRef}
+          className="fixed z-[100]"
+          style={{
+            bottom: (() => {
+              const btn = gifBtnRef.current;
+              if (!btn) return 80;
+              return window.innerHeight - btn.getBoundingClientRect().top + 8;
+            })(),
+            left: (() => {
+              const btn = gifBtnRef.current;
+              if (!btn) return 260;
+              return btn.getBoundingClientRect().left;
+            })(),
+          }}
+        >
+          <GifPicker onSelect={handleGifSelect} />
+        </div>
+      )}
     </div>
   );
 }

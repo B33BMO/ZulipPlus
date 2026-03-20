@@ -1,160 +1,151 @@
-import { useState, useEffect } from 'react';
-import { Search, Loader2 } from 'lucide-react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { Search, X, Loader2 } from 'lucide-react';
 import { Input } from './ui/input';
-import { ScrollArea } from './ui/scroll-area';
 
 interface GifPickerProps {
-  onSelectGif: (gifUrl: string) => void;
+  onSelect: (url: string, altText: string) => void;
 }
 
-interface GifData {
+interface GiphyGif {
   id: string;
+  title: string;
   images: {
-    fixed_height_small: {
-      url: string;
-      width: string;
-      height: string;
-    };
+    fixed_height: { url: string; width: string; height: string };
+    fixed_height_small: { url: string; width: string; height: string };
+    original: { url: string };
+    downsized: { url: string };
   };
 }
 
-export function GifPicker({ onSelectGif }: GifPickerProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [gifs, setGifs] = useState<GifData[]>([]);
+// GIPHY public beta key
+const GIPHY_API_KEY = 'dc6zaTOxFJmzC';
+
+export function GifPicker({ onSelect }: GifPickerProps) {
+  const [search, setSearch] = useState('');
+  const [gifs, setGifs] = useState<GiphyGif[]>([]);
   const [loading, setLoading] = useState(false);
+  const [trending, setTrending] = useState<GiphyGif[]>([]);
+  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
-  // Mock GIF data - in a real app, you would use the Giphy API
-  // API Key would be: YOUR_GIPHY_API_KEY
-  const mockGifs: GifData[] = [
-    {
-      id: '1',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    },
-    {
-      id: '2',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1574158622682-e40e69881006?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    },
-    {
-      id: '3',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1573865526739-10c1dd91e18c?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    },
-    {
-      id: '4',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1583511655857-d19b40a7a54e?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    },
-    {
-      id: '5',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1548199973-03cce0bbc87b?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    },
-    {
-      id: '6',
-      images: {
-        fixed_height_small: {
-          url: 'https://images.unsplash.com/photo-1615789591457-74a63395c990?w=200&h=150&fit=crop',
-          width: '200',
-          height: '150'
-        }
-      }
-    }
-  ];
-
+  // Load trending on mount
   useEffect(() => {
-    // Simulate loading trending gifs on mount
-    setLoading(true);
-    setTimeout(() => {
-      setGifs(mockGifs);
-      setLoading(false);
-    }, 500);
+    (async () => {
+      try {
+        setLoading(true);
+        const res = await fetch(
+          `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_API_KEY}&limit=20&rating=g`
+        );
+        const data = await res.json();
+        setTrending(data.data || []);
+      } catch {
+        // Trending not available
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  const handleSearch = (query: string) => {
-    setSearchQuery(query);
-    if (query.trim()) {
-      setLoading(true);
-      // In a real app, you would call:
-      // fetch(`https://api.giphy.com/v1/gifs/search?api_key=YOUR_API_KEY&q=${query}&limit=20`)
-      setTimeout(() => {
-        setGifs(mockGifs);
-        setLoading(false);
-      }, 500);
-    } else {
-      setGifs(mockGifs);
+  const handleSearch = useCallback((q: string) => {
+    setSearch(q);
+    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+
+    if (!q.trim()) {
+      setGifs([]);
+      return;
     }
-  };
+
+    searchTimeout.current = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(
+          `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_API_KEY}&q=${encodeURIComponent(q)}&limit=20&rating=g`
+        );
+        const data = await res.json();
+        setGifs(data.data || []);
+      } catch {
+        setGifs([]);
+      } finally {
+        setLoading(false);
+      }
+    }, 400);
+  }, []);
+
+  const displayGifs = search.trim() ? gifs : trending;
 
   return (
-    <div className="w-80 h-96 bg-[#2b2d31] rounded-lg border border-[#1e1f22] flex flex-col">
-      <div className="p-3 border-b border-[#1e1f22]">
+    <div className="w-96 h-96 bg-[#2b2d31] border border-[#1e1f22] rounded-lg shadow-xl flex flex-col overflow-hidden">
+      {/* Search */}
+      <div className="p-2 border-b border-[#1e1f22]">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-500" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-gray-500" />
           <Input
             type="text"
-            placeholder="Search for GIFs"
-            value={searchQuery}
+            placeholder="Search GIFs..."
+            value={search}
             onChange={(e) => handleSearch(e.target.value)}
-            className="pl-10 bg-[#1e1f22] border-[#1e1f22] text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-[#5865f2]"
+            className="pl-8 pr-8 h-8 bg-[#1e1f22] border-[#1e1f22] text-gray-200 text-sm placeholder:text-gray-500"
           />
+          {search && (
+            <button
+              onClick={() => {
+                setSearch('');
+                setGifs([]);
+              }}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
         </div>
       </div>
-      
-      <ScrollArea className="flex-1 p-2">
-        {loading ? (
+
+      {/* Category label */}
+      <div className="px-3 py-1.5">
+        <p className="text-xs text-gray-500 uppercase font-semibold">
+          {search.trim() ? 'Results' : 'Trending'}
+        </p>
+      </div>
+
+      {/* GIF grid */}
+      <div className="flex-1 overflow-y-auto px-2 pb-2">
+        {loading && displayGifs.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <Loader2 className="size-8 text-gray-400 animate-spin" />
+            <Loader2 className="size-6 text-gray-400 animate-spin" />
+          </div>
+        ) : displayGifs.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-gray-500 text-sm">
+              {search.trim() ? 'No GIFs found' : 'Loading...'}
+            </p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-2">
-            {gifs.map((gif) => (
+          <div className="columns-2 gap-1.5">
+            {displayGifs.map((gif) => (
               <button
                 key={gif.id}
-                onClick={() => onSelectGif(gif.images.fixed_height_small.url)}
-                className="relative aspect-video rounded overflow-hidden hover:opacity-80 transition-opacity bg-[#1e1f22]"
+                onClick={() =>
+                  onSelect(
+                    gif.images.downsized?.url || gif.images.original.url,
+                    gif.title || 'GIF'
+                  )
+                }
+                className="mb-1.5 w-full rounded overflow-hidden hover:ring-2 hover:ring-[#5865f2] cursor-pointer break-inside-avoid"
               >
                 <img
                   src={gif.images.fixed_height_small.url}
-                  alt="GIF"
-                  className="w-full h-full object-cover"
+                  alt={gif.title}
+                  className="w-full h-auto"
+                  loading="lazy"
                 />
               </button>
             ))}
           </div>
         )}
-      </ScrollArea>
-      
-      <div className="p-2 border-t border-[#1e1f22]">
-        <p className="text-xs text-gray-500 text-center">
-          Powered by GIPHY
-        </p>
+      </div>
+
+      {/* GIPHY attribution */}
+      <div className="px-3 py-1.5 border-t border-[#1e1f22] flex-shrink-0">
+        <p className="text-[10px] text-gray-600 text-center">Powered by GIPHY</p>
       </div>
     </div>
   );

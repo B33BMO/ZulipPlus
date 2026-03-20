@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { Hash, User, MessageSquare, Loader2 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
-import { MessageComposer } from './components/MessageComposer';
+import { RichComposer } from './components/RichComposer';
 import { ProfileDropdown } from './components/ProfileDropdown';
 import { SearchBar } from './components/SearchBar';
 import { SignIn } from './components/SignIn';
@@ -211,7 +211,7 @@ function AppContent() {
                 </span>
               </div>
             )}
-            <MessageComposer
+            <RichComposer
               onSendMessage={handleSendMessage}
               onFileUpload={handleFileUpload}
               placeholder={getPlaceholder()}
