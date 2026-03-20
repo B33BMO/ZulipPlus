@@ -1,5 +1,7 @@
 # Ignore list for Eagle, a PCB layout tool
-
+node_modules/
+dist/
+dist-electron/
 # Backup files
 *.s#?
 *.b#?
