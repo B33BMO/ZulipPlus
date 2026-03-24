@@ -73,9 +73,9 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   const displayGifs = search.trim() ? gifs : trending;
 
   return (
-    <div className="w-96 h-96 bg-[#2b2d31] border border-[#1e1f22] rounded-lg shadow-xl flex flex-col overflow-hidden">
+    <div className="w-96 h-96 bg-surface-secondary border border-surface-tertiary rounded-lg shadow-xl flex flex-col overflow-hidden">
       {/* Search */}
-      <div className="p-2 border-b border-[#1e1f22]">
+      <div className="p-2 border-b border-surface-tertiary">
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-gray-500" />
           <Input
@@ -83,7 +83,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
             placeholder="Search GIFs..."
             value={search}
             onChange={(e) => handleSearch(e.target.value)}
-            className="pl-8 pr-8 h-8 bg-[#1e1f22] border-[#1e1f22] text-gray-200 text-sm placeholder:text-gray-500"
+            className="pl-8 pr-8 h-8 bg-surface-tertiary border-surface-tertiary text-gray-200 text-sm placeholder:text-gray-500"
           />
           {search && (
             <button
@@ -129,7 +129,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
                     gif.title || 'GIF'
                   )
                 }
-                className="mb-1.5 w-full rounded overflow-hidden hover:ring-2 hover:ring-[#5865f2] cursor-pointer break-inside-avoid"
+                className="mb-1.5 w-full rounded overflow-hidden hover:ring-2 hover:ring-brand cursor-pointer break-inside-avoid"
               >
                 <img
                   src={gif.images.fixed_height_small.url}
@@ -144,7 +144,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
       </div>
 
       {/* GIPHY attribution */}
-      <div className="px-3 py-1.5 border-t border-[#1e1f22] flex-shrink-0">
+      <div className="px-3 py-1.5 border-t border-surface-tertiary flex-shrink-0">
         <p className="text-[10px] text-gray-600 text-center">Powered by GIPHY</p>
       </div>
     </div>

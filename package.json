@@ -1,5 +1,5 @@
 {
-  "name": "zulip-client",
+  "name": "zulip",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -106,7 +106,7 @@
   },
   "build": {
     "appId": "com.zulipplus.client",
-    "productName": "Zulip Client",
+    "productName": "Zulip+",
     "directories": {
       "output": "release"
     },
@@ -118,7 +118,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "public/icon.png"
+      "icon": "public/zulip_logo.png"
     },
     "nsis": {
       "oneClick": false,

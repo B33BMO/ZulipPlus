@@ -47,6 +47,7 @@ interface ZulipContextValue {
   typingUsers: { userId: number; timestamp: number }[];
   unreadCounts: { streams: Record<string, number>; pms: Record<number, number> };
   dmConversations: DmConversation[];
+  realmEmoji: Record<string, { name: string; source_url: string }>; // id → emoji info
   loading: boolean;
   loadingOlder: boolean;
   hasMoreMessages: boolean;
@@ -64,12 +65,22 @@ interface ZulipContextValue {
     content: string;
   }) => Promise<void>;
   uploadFile: (file: File) => Promise<string>;
-  addReaction: (messageId: number, emojiName: string) => Promise<void>;
-  removeReaction: (messageId: number, emojiName: string) => Promise<void>;
+  addReaction: (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => Promise<void>;
+  removeReaction: (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => Promise<void>;
   markMessagesAsRead: (messageIds: number[]) => Promise<void>;
   sendTyping: (to: number[], op: 'start' | 'stop') => Promise<void>;
   searchMessages: (query: string) => Promise<ZulipMessage[]>;
   getUserStatus: (userId: number) => UserStatus;
+  userStatusText: string;
+  userStatusEmoji: { name: string; code: string; type: string } | null;
+  updateUserStatus: (params: {
+    status_text?: string;
+    away?: boolean;
+    emoji_name?: string;
+    emoji_code?: string;
+    reaction_type?: string;
+  }) => Promise<void>;
+  muteStream: (streamId: number, mute: boolean) => Promise<void>;
   resolveUrl: (url: string) => string;
   fetchAuthenticatedUrl: (url: string) => Promise<string>;
 }
@@ -100,6 +111,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     pms: Record<number, number>;
   }>({ streams: {}, pms: {} });
   const [dmConversations, setDmConversations] = useState<DmConversation[]>([]);
+  const [realmEmoji, setRealmEmoji] = useState<Record<string, { name: string; source_url: string }>>({});
+  const [userStatusText, setUserStatusText] = useState('');
+  const [userStatusEmoji, setUserStatusEmoji] = useState<{ name: string; code: string; type: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(true);
@@ -117,6 +131,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   // ── Event loop ────────────────────────────────────────
   const startEventLoop = useCallback(
     async (zApi: ZulipApi) => {
+      // Simple URL resolver for notifications (doesn't need React state)
+      const resolveUrlFn = (url: string) => {
+        if (url.startsWith('http://') || url.startsWith('https://')) return url;
+        return `/zulip-api${url}`;
+      };
+
       try {
         const reg = await zApi.registerEventQueue();
         queueIdRef.current = reg.queue_id;
@@ -150,17 +170,82 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
               switch (event.type) {
                 case 'message': {
                   const me = event as MessageEvent;
-                  setMessages((prev) => {
-                    if (prev.some((m) => m.id === me.message.id)) return prev;
-                    return [...prev, me.message];
-                  });
-                  // Update DM conversations if this is a DM
+                  // Only add to message list if it matches the current narrow
+                  const narrow = currentNarrowRef.current;
+                  let matchesNarrow = narrow.length === 0; // no narrow = all messages (shouldn't happen)
+                  if (!matchesNarrow) {
+                    const msg = me.message;
+                    matchesNarrow = narrow.every((n) => {
+                      switch (n.operator) {
+                        case 'stream':
+                        case 'channel':
+                          return msg.type === 'stream' && msg.display_recipient === n.operand;
+                        case 'topic':
+                        case 'subject':
+                          return msg.subject === n.operand;
+                        case 'dm':
+                        case 'pm-with': {
+                          if (msg.type !== 'private') return false;
+                          if (!Array.isArray(msg.display_recipient)) return false;
+                          const emails = (msg.display_recipient as { email: string }[])
+                            .map((r) => r.email)
+                            .sort()
+                            .join(',');
+                          const narrowEmails = String(n.operand).split(',').map((e) => e.trim()).sort().join(',');
+                          return emails.includes(narrowEmails) || narrowEmails.includes(emails);
+                        }
+                        case 'is':
+                          if (n.operand === 'dm' || n.operand === 'private') return msg.type === 'private';
+                          return true;
+                        default:
+                          return true;
+                      }
+                    });
+                  }
+                  if (matchesNarrow) {
+                    setMessages((prev) => {
+                      if (prev.some((m) => m.id === me.message.id)) return prev;
+                      return [...prev, me.message];
+                    });
+                  } else {
+                    // Increment unread count for messages not in current view
+                    const msg = me.message;
+                    if (msg.type === 'stream' && typeof msg.display_recipient === 'string') {
+                      setUnreadCounts((prev) => {
+                        const key = `${msg.stream_id}:${msg.subject}`;
+                        return {
+                          ...prev,
+                          streams: { ...prev.streams, [key]: (prev.streams[key] || 0) + 1 },
+                        };
+                      });
+                    } else if (msg.type === 'private') {
+                      setUnreadCounts((prev) => ({
+                        ...prev,
+                        pms: { ...prev.pms, [msg.sender_id]: (prev.pms[msg.sender_id] || 0) + 1 },
+                      }));
+                      // Desktop notification for DMs from other users
+                      if (msg.sender_id !== profile.user_id && typeof Notification !== 'undefined') {
+                        if (Notification.permission === 'granted') {
+                          const div = document.createElement('div');
+                          div.innerHTML = msg.content;
+                          const text = div.textContent || div.innerText || '';
+                          new Notification(msg.sender_full_name, {
+                            body: text.slice(0, 200),
+                            icon: resolveUrlFn(msg.avatar_url),
+                          });
+                        }
+                      }
+                    }
+                  }
+                  // Update DM conversations if this is a DM — bump to top
                   if (me.message.type === 'private' && Array.isArray(me.message.display_recipient)) {
-                    const otherUsers = (me.message.display_recipient as { id: number }[])
-                      .filter((r) => r.id !== me.message.sender_id || me.message.display_recipient.length === 1)
-                      .map((r) => r.id);
-                    // For the sender if they're someone else
-                    const dmUserId = me.message.sender_id;
+                    const recipients = me.message.display_recipient as { id: number }[];
+                    const others = recipients.filter((r) => r.id !== me.message.sender_id);
+                    // Self-DM: only recipient is yourself; otherwise use the other person
+                    const dmUserId = others.length === 0 ? me.message.sender_id :
+                      (me.message.sender_id === recipients[0]?.id && recipients.length > 1
+                        ? recipients.find((r) => r.id !== me.message.sender_id)!.id
+                        : me.message.sender_id);
                     setDmConversations((prev) => {
                       const filtered = prev.filter((d) => d.userId !== dmUserId);
                       return [{ userId: dmUserId, lastMessageTimestamp: me.message.timestamp }, ...filtered];
@@ -306,6 +391,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       // Validate credentials
       const profile = await zApi.getProfile();
 
+      // Request notification permission
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+
       // Fetch initial data in parallel
       const [usersRes, subsRes, presenceRes, dmRes] = await Promise.all([
         zApi.getUsers(),
@@ -325,6 +415,19 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       setUsers(usersRes.members.filter((u) => u.is_active));
       setSubscriptions(subsRes.subscriptions);
 
+      // Fetch realm custom emoji (non-blocking)
+      zApi.request<{ result: string; emoji: Record<string, { id: string; name: string; source_url: string; deactivated: boolean }> }>('/realm/emoji')
+        .then((res) => {
+          const emojiMap: Record<string, { name: string; source_url: string }> = {};
+          for (const [id, info] of Object.entries(res.emoji)) {
+            if (!info.deactivated) {
+              emojiMap[id] = { name: info.name, source_url: info.source_url };
+            }
+          }
+          setRealmEmoji(emojiMap);
+        })
+        .catch(() => {});
+
       // Build presence map
       const presMap: PresenceMap = {};
       for (const [email, data] of Object.entries(presenceRes.presences)) {
@@ -343,8 +446,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       for (const msg of dmRes.messages) {
         // For DMs, display_recipient is an array of users
         if (Array.isArray(msg.display_recipient)) {
-          for (const recipient of msg.display_recipient) {
-            if (recipient.id !== profile.user_id) {
+          const others = (msg.display_recipient as { id: number }[]).filter(
+            (r) => r.id !== profile.user_id
+          );
+          if (others.length === 0) {
+            // Self-DM: the only recipient is yourself
+            const existing = dmMap.get(profile.user_id);
+            if (!existing || msg.timestamp > existing) {
+              dmMap.set(profile.user_id, msg.timestamp);
+            }
+          } else {
+            for (const recipient of others) {
               const existing = dmMap.get(recipient.id);
               if (!existing || msg.timestamp > existing) {
                 dmMap.set(recipient.id, msg.timestamp);
@@ -430,8 +542,49 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       setMessages(res.messages);
       setHasMoreMessages(!res.found_oldest);
       setLoading(false);
+
+      // Mark all loaded messages as read and clear unread counts
+      const unreadIds = res.messages
+        .filter((m) => !(m.flags ?? []).includes('read'))
+        .map((m) => m.id);
+      if (unreadIds.length > 0) {
+        api.updateMessageFlags({ messages: unreadIds, op: 'add', flag: 'read' }).catch(() => {});
+      }
+
+      // Clear local unread counts for this narrow
+      const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
+      const streamNarrow = narrow.find((n) => n.operator === 'stream' || n.operator === 'channel');
+      const topicNarrow = narrow.find((n) => n.operator === 'topic' || n.operator === 'subject');
+
+      if (dmNarrow) {
+        const email = String(dmNarrow.operand);
+        setUnreadCounts((prev) => {
+          const pms = { ...prev.pms };
+          const matchedUser = users.find((u) => u.email === email);
+          if (matchedUser) delete pms[matchedUser.user_id];
+          return { ...prev, pms };
+        });
+      }
+      if (streamNarrow && topicNarrow) {
+        const operand = streamNarrow.operand;
+        const topicName = String(topicNarrow.operand);
+        let streamId: number | undefined;
+        if (typeof operand === 'number') {
+          streamId = operand;
+        } else {
+          const sub = subscriptions.find((s) => s.name === operand || s.stream_id === Number(operand));
+          streamId = sub?.stream_id;
+        }
+        if (streamId !== undefined) {
+          setUnreadCounts((prev) => {
+            const streams = { ...prev.streams };
+            delete streams[`${streamId}:${topicName}`];
+            return { ...prev, streams };
+          });
+        }
+      }
     },
-    [api]
+    [api, users, subscriptions]
   );
 
   const loadOlderMessages = useCallback(
@@ -479,17 +632,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   const addReaction = useCallback(
-    async (messageId: number, emojiName: string) => {
+    async (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => {
       if (!api) return;
-      await api.addReaction(messageId, emojiName);
+      await api.addReaction(messageId, emojiName, emojiCode, reactionType);
     },
     [api]
   );
 
   const removeReaction = useCallback(
-    async (messageId: number, emojiName: string) => {
+    async (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => {
       if (!api) return;
-      await api.removeReaction(messageId, emojiName);
+      await api.removeReaction(messageId, emojiName, emojiCode, reactionType);
     },
     [api]
   );
@@ -502,8 +655,52 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         op: 'add',
         flag: 'read',
       });
+      // Clear local unread counts for the current narrow
+      const narrow = currentNarrowRef.current;
+      if (narrow.length === 0) return;
+      const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
+      const streamNarrow = narrow.find((n) => n.operator === 'stream' || n.operator === 'channel');
+      const topicNarrow = narrow.find((n) => n.operator === 'topic' || n.operator === 'subject');
+
+      if (dmNarrow) {
+        // Find the user ID for this DM email and clear pm count
+        setUnreadCounts((prev) => {
+          const pms = { ...prev.pms };
+          // Clear all DM unreads for users whose email matches the narrow
+          for (const [uid, count] of Object.entries(pms)) {
+            // We'll clear broadly — the message list already filtered correctly
+            delete pms[Number(uid)];
+          }
+          // More targeted: find the user by email
+          const email = String(dmNarrow.operand);
+          const matchedUser = users.find((u) => u.email === email);
+          if (matchedUser) {
+            delete pms[matchedUser.user_id];
+          }
+          return { ...prev, pms };
+        });
+      }
+      if (streamNarrow && topicNarrow) {
+        setUnreadCounts((prev) => {
+          const streams = { ...prev.streams };
+          // Find stream ID - operand could be name or ID
+          const operand = streamNarrow.operand;
+          const topicName = String(topicNarrow.operand);
+          let streamId: number | undefined;
+          if (typeof operand === 'number') {
+            streamId = operand;
+          } else {
+            const sub = subscriptions.find((s) => s.name === operand || s.stream_id === Number(operand));
+            streamId = sub?.stream_id;
+          }
+          if (streamId !== undefined) {
+            delete streams[`${streamId}:${topicName}`];
+          }
+          return { ...prev, streams };
+        });
+      }
     },
-    [api]
+    [api, users, subscriptions]
   );
 
   const sendTyping = useCallback(
@@ -544,7 +741,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   // Fetch a URL with auth and return a blob URL (for images in messages)
+  // LRU cache with max size to prevent unbounded memory growth
   const blobCache = useRef<Map<string, string>>(new Map());
+  const BLOB_CACHE_MAX = 200;
   const fetchAuthenticatedUrl = useCallback(
     async (url: string): Promise<string> => {
       const cached = blobCache.current.get(url);
@@ -558,6 +757,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
+
+        // Evict oldest entries if cache is full
+        if (blobCache.current.size >= BLOB_CACHE_MAX) {
+          const firstKey = blobCache.current.keys().next().value;
+          if (firstKey) {
+            const oldUrl = blobCache.current.get(firstKey);
+            if (oldUrl) URL.revokeObjectURL(oldUrl);
+            blobCache.current.delete(firstKey);
+          }
+        }
+
         blobCache.current.set(url, blobUrl);
         return blobUrl;
       } catch {
@@ -579,6 +789,39 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [presence]
   );
 
+  const updateUserStatus = useCallback(
+    async (params: {
+      status_text?: string;
+      away?: boolean;
+      emoji_name?: string;
+      emoji_code?: string;
+      reaction_type?: string;
+    }) => {
+      if (!api) return;
+      await api.updateStatus(params);
+      if (params.status_text !== undefined) setUserStatusText(params.status_text);
+      if (params.emoji_name !== undefined) {
+        setUserStatusEmoji(
+          params.emoji_name
+            ? { name: params.emoji_name, code: params.emoji_code || '', type: params.reaction_type || 'unicode_emoji' }
+            : null
+        );
+      }
+    },
+    [api]
+  );
+
+  const muteStream = useCallback(
+    async (streamId: number, mute: boolean) => {
+      if (!api) return;
+      await api.updateSubscriptionProperty(streamId, 'is_muted', mute);
+      setSubscriptions((prev) =>
+        prev.map((s) => (s.stream_id === streamId ? { ...s, is_muted: mute } : s))
+      );
+    },
+    [api]
+  );
+
   return (
     <ZulipContext.Provider
       value={{
@@ -592,6 +835,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         typingUsers,
         unreadCounts,
         dmConversations,
+        realmEmoji,
         loading,
         loadingOlder,
         hasMoreMessages,
@@ -608,6 +852,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         sendTyping,
         searchMessages,
         getUserStatus,
+        userStatusText,
+        userStatusEmoji,
+        updateUserStatus,
+        muteStream,
         resolveUrl,
         fetchAuthenticatedUrl,
       }}

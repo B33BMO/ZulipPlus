@@ -21,9 +21,9 @@ export function SignIn() {
   // If auto-login is in progress, show a loading screen
   if (autoLogging) {
     return (
-      <div className="size-full flex items-center justify-center bg-[#313338]">
+      <div className="size-full flex items-center justify-center bg-surface-primary">
         <div className="text-center">
-          <div className="size-10 border-3 border-[#5865f2] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <div className="size-10 border-3 border-brand border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-gray-400 text-sm">Signing in...</p>
         </div>
       </div>
@@ -52,9 +52,9 @@ export function SignIn() {
   };
 
   return (
-    <div className="size-full flex items-center justify-center bg-[#313338]">
+    <div className="size-full flex items-center justify-center bg-surface-primary">
       <div className="w-full max-w-md p-8">
-        <div className="bg-[#2b2d31] rounded-lg p-8 shadow-2xl">
+        <div className="bg-surface-secondary rounded-lg p-8 shadow-2xl">
           {/* Header */}
           <div className="text-center mb-8">
             <h1 className="text-2xl font-bold text-white mb-2">
@@ -80,7 +80,7 @@ export function SignIn() {
                   placeholder="https://yourorg.zulipchat.com"
                   value={server}
                   onChange={(e) => setServer(e.target.value)}
-                  className="pl-11 bg-[#1e1f22] border-[#1e1f22] text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-[#5865f2] h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
@@ -99,7 +99,7 @@ export function SignIn() {
                   placeholder="your.email@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="pl-11 bg-[#1e1f22] border-[#1e1f22] text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-[#5865f2] h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
@@ -118,7 +118,7 @@ export function SignIn() {
                   placeholder="Enter your API key"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  className="pl-11 bg-[#1e1f22] border-[#1e1f22] text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-[#5865f2] h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
@@ -138,7 +138,7 @@ export function SignIn() {
             <Button
               type="submit"
               disabled={loading}
-              className="w-full bg-[#5865f2] hover:bg-[#4752c4] text-white h-11 font-semibold"
+              className="w-full bg-brand hover:bg-brand-hover text-white h-11 font-semibold"
             >
               {loading ? (
                 <span className="flex items-center gap-2">
@@ -155,14 +155,14 @@ export function SignIn() {
           </form>
 
           {/* Help Text */}
-          <div className="mt-6 pt-6 border-t border-[#1e1f22]">
+          <div className="mt-6 pt-6 border-t border-surface-tertiary">
             <p className="text-xs text-gray-500 text-center">
               Don't have an API key?{' '}
               <a
                 href="https://zulip.com/api/api-keys"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[#5865f2] hover:underline"
+                className="text-brand hover:underline"
               >
                 Learn how to get one
               </a>

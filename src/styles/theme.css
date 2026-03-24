@@ -4,6 +4,26 @@
   --font-size: 16px;
   --background: #ffffff;
   --foreground: oklch(0.145 0 0);
+
+  /* Surface colors (light theme) */
+  --surface-primary: #ffffff;
+  --surface-secondary: #f2f3f5;
+  --surface-tertiary: #e3e5e8;
+  --surface-overlay: #ffffff;
+  --surface-hover: #e8e9eb;
+  --surface-float: #f9fafb;
+  --surface-composer: #ebedef;
+
+  /* Brand / accent */
+  --brand: #5865f2;
+  --brand-hover: #4752c4;
+  --brand-muted: rgba(88, 101, 242, 0.2);
+
+  /* Text colors (light theme) */
+  --text-primary: #060607;
+  --text-secondary: #4e5058;
+  --text-muted: #80848e;
+  --text-link: #006ce7;
   --card: #ffffff;
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -44,6 +64,23 @@
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
+
+  /* Surface colors (dark theme) */
+  --surface-primary: #313338;
+  --surface-secondary: #2b2d31;
+  --surface-tertiary: #1e1f22;
+  --surface-overlay: #111214;
+  --surface-hover: #404249;
+  --surface-float: #383a40;
+  --surface-composer: #383a40;
+
+  /* Brand inherits from :root unless overridden by accent */
+
+  /* Text colors (dark theme) */
+  --text-primary: #f2f3f5;
+  --text-secondary: #b5bac1;
+  --text-muted: #949ba4;
+  --text-link: #00a8fc;
   --card: oklch(0.145 0 0);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.145 0 0);
@@ -117,6 +154,26 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Surface system */
+  --color-surface-primary: var(--surface-primary);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-surface-tertiary: var(--surface-tertiary);
+  --color-surface-overlay: var(--surface-overlay);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-float: var(--surface-float);
+  --color-surface-composer: var(--surface-composer);
+
+  /* Brand */
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-muted: var(--brand-muted);
+
+  /* Text */
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-text-link: var(--text-link);
 }
 
 @layer base {

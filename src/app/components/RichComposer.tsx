@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useEffect } from 'react';
+import { useCallback, useRef, useState, useEffect, useImperativeHandle, forwardRef, useMemo } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -6,6 +6,8 @@ import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
 import Image from '@tiptap/extension-image';
 import { Markdown } from 'tiptap-markdown';
+import { useZulip } from '../context/ZulipContext';
+import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import {
   Send,
   Smile,
@@ -31,26 +33,49 @@ import {
 import { EmojiPicker } from './EmojiPicker';
 import { GifPicker } from './GifPicker';
 
+export interface RichComposerHandle {
+  insertContent: (markdown: string) => void;
+  insertRawText: (text: string) => void;
+  clearContent: () => void;
+}
+
 interface RichComposerProps {
   onSendMessage: (content: string) => Promise<void>;
   onFileUpload?: (file: File) => Promise<string>;
   placeholder?: string;
 }
 
-export function RichComposer({
+export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(function RichComposer({
   onSendMessage,
   onFileUpload,
   placeholder = 'Type a message...',
-}: RichComposerProps) {
+}, ref) {
+  const { users, currentUser } = useZulip();
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionPos, setMentionPos] = useState<{ top: number; left: number } | null>(null);
+  const mentionStartRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const emojiBtnRef = useRef<HTMLDivElement>(null);
   const emojiRef = useRef<HTMLDivElement>(null);
   const gifBtnRef = useRef<HTMLDivElement>(null);
   const gifRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+
+  // Filter users for mention autocomplete
+  const mentionUsers = useMemo(() => {
+    if (mentionQuery === null) return [];
+    const q = mentionQuery.toLowerCase();
+    const allUsers = currentUser ? [currentUser, ...users.filter(u => u.user_id !== currentUser.user_id)] : users;
+    return allUsers
+      .filter((u) => u.is_active && !u.is_bot && u.full_name.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [mentionQuery, users, currentUser]);
 
   const editor = useEditor({
     extensions: [
@@ -63,7 +88,7 @@ export function RichComposer({
       Placeholder.configure({ placeholder }),
       Link.configure({
         openOnClick: false,
-        HTMLAttributes: { class: 'text-[#5865f2] underline' },
+        HTMLAttributes: { class: 'text-brand underline' },
       }),
       Underline,
       Image.configure({
@@ -84,14 +109,111 @@ export function RichComposer({
       handleKeyDown: (_view, event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
-          handleSend();
+          handleSendRef.current();
           return true;
+        }
+        return false;
+      },
+      handlePaste: (_view, event) => {
+        const items = event.clipboardData?.items;
+        if (!items) return false;
+        for (const item of items) {
+          if (item.type.startsWith('image/') || item.type.startsWith('video/') || item.type.startsWith('application/')) {
+            const file = item.getAsFile();
+            if (file && onFileUpload) {
+              event.preventDefault();
+              handleFileUploadInternal(file);
+              return true;
+            }
+          }
         }
         return false;
       },
     },
     content: '',
   });
+
+  // Expose insertContent, insertRawText, and clearContent to parent via ref
+  useImperativeHandle(ref, () => ({
+    insertContent: (markdown: string) => {
+      if (!editor) return;
+      editor.chain().focus().insertContent(markdown).run();
+    },
+    insertRawText: (text: string) => {
+      if (!editor) return;
+      editor.chain().focus().insertContent({ type: 'text', text }).run();
+    },
+    clearContent: () => {
+      if (!editor) return;
+      editor.commands.clearContent();
+    },
+  }), [editor]);
+
+  // Update placeholder when prop changes — destroy and re-init the placeholder plugin
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    // Update the placeholder option on the extension
+    editor.extensionManager.extensions.forEach((ext) => {
+      if (ext.name === 'placeholder') {
+        (ext.options as any).placeholder = placeholder;
+      }
+    });
+    // Re-register plugins to pick up the new placeholder value
+    const plugins = editor.extensionManager.plugins;
+    editor.view.updateState(
+      editor.state.reconfigure({ plugins })
+    );
+  }, [editor, placeholder]);
+
+  // Upload a file and insert into editor
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const handleFileUploadInternal = useCallback(async (file: File) => {
+    if (!onFileUpload || !editor) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const uri = await onFileUpload(file);
+      if (file.type.startsWith('image/')) {
+        editor.chain().focus().setImage({ src: uri, alt: file.name }).run();
+      } else {
+        editor.chain().focus().insertContent(`[${file.name}](${uri})`).run();
+      }
+    } catch (err) {
+      console.error('Failed to upload file:', err);
+      setUploadError(`Failed to upload ${file.name}`);
+      setTimeout(() => setUploadError(null), 4000);
+    } finally {
+      setUploading(false);
+    }
+  }, [editor, onFileUpload]);
+
+  // Drag & drop file upload — validate file types like paste handler
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      for (const file of Array.from(files)) {
+        if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('application/')) {
+          handleFileUploadInternal(file);
+        }
+      }
+    }
+  }, [handleFileUploadInternal]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
 
   // Close pickers on click outside
   useEffect(() => {
@@ -134,47 +256,93 @@ export function RichComposer({
     }
   }, [editor, sending, onSendMessage]);
 
-  // Update handleKeyDown when handleSend changes
+  // Use a ref so the Enter key handler always calls the latest handleSend
+  // without needing to re-register the handler on every state change
+  const handleSendRef = useRef(handleSend);
+  useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
+
+  // Detect @mention trigger on every editor update
   useEffect(() => {
     if (!editor) return;
-    // Re-register the key handler by updating editor props
-    editor.setOptions({
-      editorProps: {
-        ...editor.options.editorProps,
-        handleKeyDown: (_view, event) => {
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            handleSend();
-            return true;
-          }
-          return false;
-        },
-      },
-    });
-  }, [editor, handleSend]);
+    const onUpdate = () => {
+      const { from } = editor.state.selection;
+      const textBefore = editor.state.doc.textBetween(Math.max(0, from - 50), from, '\n');
+      const match = textBefore.match(/@([A-Za-z ]*)$/);
+      if (match) {
+        mentionStartRef.current = from - match[0].length;
+        setMentionQuery(match[1]);
+        setMentionIndex(0);
+        try {
+          const coords = editor.view.coordsAtPos(from);
+          const editorRect = editor.view.dom.getBoundingClientRect();
+          setMentionPos({
+            left: coords.left - editorRect.left,
+            top: coords.top - editorRect.top - 4,
+          });
+        } catch {
+          setMentionPos({ left: 0, top: 0 });
+        }
+      } else {
+        setMentionQuery(null);
+        setMentionPos(null);
+        mentionStartRef.current = null;
+      }
+    };
+    editor.on('update', onUpdate);
+    editor.on('selectionUpdate', onUpdate);
+    return () => {
+      editor.off('update', onUpdate);
+      editor.off('selectionUpdate', onUpdate);
+    };
+  }, [editor]);
+
+  // Insert a mention and close the popup
+  const insertMention = useCallback((userName: string) => {
+    if (!editor || mentionStartRef.current === null) return;
+    const from = mentionStartRef.current;
+    const to = editor.state.selection.from;
+    // Delete the @query text and insert the Zulip mention syntax
+    editor.chain().focus()
+      .deleteRange({ from, to })
+      .insertContent(`@**${userName}** `)
+      .run();
+    setMentionQuery(null);
+    setMentionPos(null);
+    mentionStartRef.current = null;
+  }, [editor]);
+
+  // Handle keyboard navigation in mention popup
+  useEffect(() => {
+    if (mentionQuery === null || !editor) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex((i) => Math.min(i + 1, mentionUsers.length - 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex((i) => Math.max(i - 1, 0));
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (mentionUsers.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          insertMention(mentionUsers[mentionIndex].full_name);
+        }
+      } else if (e.key === 'Escape') {
+        setMentionQuery(null);
+        setMentionPos(null);
+        mentionStartRef.current = null;
+      }
+    };
+    // Capture phase to intercept before TipTap's Enter handler
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, [mentionQuery, mentionUsers, mentionIndex, insertMention, editor]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !onFileUpload || !editor) return;
-
-    setUploading(true);
-    try {
-      const uri = await onFileUpload(file);
-      if (file.type.startsWith('image/')) {
-        editor.chain().focus().setImage({ src: uri, alt: file.name }).run();
-      } else {
-        editor
-          .chain()
-          .focus()
-          .insertContent(`[${file.name}](${uri})`)
-          .run();
-      }
-    } catch (err) {
-      console.error('Failed to upload file:', err);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
+    if (!file) return;
+    await handleFileUploadInternal(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleEmojiSelect = (emoji: string) => {
@@ -196,10 +364,58 @@ export function RichComposer({
     editor.isActive(type, attrs);
 
   return (
-    <div className="px-4 pb-6 flex-shrink-0">
-      <div className="bg-[#383a40] rounded-lg">
+    <div
+      ref={composerRef}
+      className="px-4 pb-6 flex-shrink-0"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+    >
+      <div className={`bg-surface-composer rounded-lg transition-colors ${dragOver ? 'ring-2 ring-brand bg-brand/10' : ''}`}>
+        {/* Drag overlay */}
+        {dragOver && (
+          <div className="flex items-center justify-center py-4 text-sm text-brand font-medium">
+            Drop files to upload
+          </div>
+        )}
+        {/* Upload error banner */}
+        {uploadError && (
+          <div className="flex items-center justify-center py-1.5 text-xs text-red-400 bg-red-500/10 rounded-t-lg">
+            {uploadError}
+          </div>
+        )}
         {/* Editor Area */}
-        <EditorContent editor={editor} />
+        <div className="relative">
+          <EditorContent editor={editor} />
+
+          {/* @mention autocomplete popup */}
+          {mentionQuery !== null && mentionUsers.length > 0 && mentionPos && (
+            <div
+              className="absolute z-50 bg-surface-secondary border border-surface-tertiary rounded-lg shadow-xl py-1 max-h-64 overflow-y-auto w-64"
+              style={{ bottom: '100%', left: mentionPos.left, marginBottom: 4 }}
+            >
+              {mentionUsers.map((user, i) => (
+                <button
+                  key={user.user_id}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors ${
+                    i === mentionIndex ? 'bg-brand text-white' : 'text-text-primary hover:bg-surface-hover'
+                  }`}
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // Prevent editor blur
+                    insertMention(user.full_name);
+                  }}
+                  onMouseEnter={() => setMentionIndex(i)}
+                >
+                  <Avatar className="size-6">
+                    <AvatarImage src={user.avatar_url} alt={user.full_name} />
+                    <AvatarFallback className="text-[10px]">{(user.full_name || '?')[0]}</AvatarFallback>
+                  </Avatar>
+                  <span className="truncate">{user.full_name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Toolbar */}
         <div className="flex items-center justify-between px-3 pb-2">
@@ -211,7 +427,7 @@ export function RichComposer({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-[#404249]"
+                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading}
                   >
@@ -232,8 +448,8 @@ export function RichComposer({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                        showEmojiPicker ? 'text-gray-200 bg-[#404249]' : 'text-gray-400'
+                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                        showEmojiPicker ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
                       }`}
                       onClick={() => {
                         setShowEmojiPicker(!showEmojiPicker);
@@ -254,8 +470,8 @@ export function RichComposer({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                        showGifPicker ? 'text-gray-200 bg-[#404249]' : 'text-gray-400'
+                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                        showGifPicker ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
                       }`}
                       onClick={() => {
                         setShowGifPicker(!showGifPicker);
@@ -279,8 +495,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleBold().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('bold') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('bold') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <Bold className="size-4" />
@@ -295,8 +511,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleItalic().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('italic') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('italic') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <Italic className="size-4" />
@@ -311,8 +527,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleStrike().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('strike') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('strike') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <Strikethrough className="size-4" />
@@ -327,8 +543,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleOrderedList().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('orderedList') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('orderedList') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <ListOrdered className="size-4" />
@@ -343,8 +559,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleBulletList().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('bulletList') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('bulletList') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <List className="size-4" />
@@ -359,8 +575,8 @@ export function RichComposer({
                     onClick={() => editor.chain().focus().toggleBlockquote().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
-                      isActive('blockquote') ? 'text-white bg-[#404249]' : 'text-gray-400'
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                      isActive('blockquote') ? 'text-white bg-surface-hover' : 'text-gray-400'
                     }`}
                   >
                     <Quote className="size-4" />
@@ -383,9 +599,9 @@ export function RichComposer({
                     }}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-[#404249] ${
+                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
                       isActive('code') || isActive('codeBlock')
-                        ? 'text-white bg-[#404249]'
+                        ? 'text-white bg-surface-hover'
                         : 'text-gray-400'
                     }`}
                   >
@@ -408,7 +624,7 @@ export function RichComposer({
                     }}
                     variant="ghost"
                     size="icon"
-                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-[#404249]"
+                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
                   >
                     <Eye className="size-4" />
                   </Button>
@@ -422,7 +638,7 @@ export function RichComposer({
             onClick={handleSend}
             disabled={sending}
             size="icon"
-            className="size-8 bg-[#5865f2] hover:bg-[#4752c4] disabled:bg-[#4e5058] disabled:text-gray-600"
+            className="size-8 bg-brand hover:bg-brand-hover disabled:bg-[#4e5058] disabled:text-gray-600"
           >
             {sending ? (
               <Loader2 className="size-4 animate-spin" />
@@ -486,4 +702,4 @@ export function RichComposer({
       )}
     </div>
   );
-}
+});

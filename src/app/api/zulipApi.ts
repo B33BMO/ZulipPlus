@@ -155,9 +155,14 @@ export class ZulipApi {
   // ── Reactions ─────────────────────────────────────────
   async addReaction(
     messageId: number,
-    emojiName: string
+    emojiName: string,
+    emojiCode?: string,
+    reactionType?: string
   ): Promise<{ result: string; msg: string }> {
-    const body = this.encodeParams({ emoji_name: emojiName });
+    const params: Record<string, string> = { emoji_name: emojiName };
+    if (emojiCode) params.emoji_code = emojiCode;
+    if (reactionType) params.reaction_type = reactionType;
+    const body = this.encodeParams(params);
     return this.request(`/messages/${messageId}/reactions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -167,9 +172,14 @@ export class ZulipApi {
 
   async removeReaction(
     messageId: number,
-    emojiName: string
+    emojiName: string,
+    emojiCode?: string,
+    reactionType?: string
   ): Promise<{ result: string; msg: string }> {
-    const body = this.encodeParams({ emoji_name: emojiName });
+    const params: Record<string, string> = { emoji_name: emojiName };
+    if (emojiCode) params.emoji_code = emojiCode;
+    if (reactionType) params.reaction_type = reactionType;
+    const body = this.encodeParams(params);
     return this.request(`/messages/${messageId}/reactions`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -287,6 +297,22 @@ export class ZulipApi {
   }): Promise<{ result: string; msg: string }> {
     const body = this.encodeParams(params);
     return this.request('/users/me/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  }
+
+  // ── Subscription Properties ────────────────────────────
+  async updateSubscriptionProperty(
+    streamId: number,
+    property: string,
+    value: boolean | string | number
+  ): Promise<{ result: string; msg: string }> {
+    const body = this.encodeParams({
+      subscription_data: JSON.stringify([{ stream_id: streamId, property, value }]),
+    });
+    return this.request('/users/me/subscriptions/properties', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,

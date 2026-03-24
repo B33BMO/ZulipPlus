@@ -1,53 +1,30 @@
-# Ignore list for Eagle, a PCB layout tool
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 dist-electron/
-# Backup files
-*.s#?
-*.b#?
-*.l#?
-*.b$?
-*.s$?
-*.l$?
 
-# Eagle project file
-# It contains a serial number and references to the file structure
-# on your computer.
-# comment the following line if you want to have your project file included.
-eagle.epf
+# Electron builder output
+release/
 
-# Autorouter files
-*.pro
-*.job
+# Claude Code session files
+.claude/*.jsonl
+.claude/*/
+.claude/metadata.json
+.claude/*.zip
+*.jsonl
+metadata.json
+1cdb2e36-f234-4cb0-a9bc-f181d2f73f40/
 
-# CAM files
-*.$$$
-*.cmp
-*.ly2
-*.l15
-*.sol
-*.plc
-*.stc
-*.sts
-*.crc
-*.crs
+# Environment
+.env
+.env.local
 
-*.dri
-*.drl
-*.gpi
-*.pls
-*.ger
-*.xln
+# IDE
+.vscode/
+.idea/
 
-*.drd
-*.drd.*
-
-*.s#*
-*.b#*
-
-*.info
-
-*.eps
-
-# file locks introduced since 7.x
-*.lck
+# OS
+.DS_Store
+Thumbs.db

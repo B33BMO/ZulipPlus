@@ -1,16 +1,82 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { useZulip } from '../context/ZulipContext';
 import type { ZulipMessage } from '../api/types';
 import { format } from 'date-fns';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Quote, SmilePlus } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+import { Button } from './ui/button';
+import { EmojiPicker } from './EmojiPicker';
 
-export function MessageList() {
-  const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder } = useZulip();
+interface MessageListProps {
+  onQuote?: (senderName: string, content: string) => void;
+}
+
+export function MessageList({ onQuote }: MessageListProps = {}) {
+  const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji } = useZulip();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const hasScrolled = useRef(false);
   const prevScrollHeight = useRef(0);
+  const isNearBottom = useRef(true);
+  const pendingImages = useRef(0);
+  const [reactingMessageId, setReactingMessageId] = useState<number | null>(null);
+  const [pickerPos, setPickerPos] = useState<{ right: number; bottom: number } | null>(null);
+  const reactPickerRef = useRef<HTMLDivElement>(null);
+  const [viewerImage, setViewerImage] = useState<string | null>(null);
+
+  // Handle clicks on links (open external) and images (open viewer)
+  const handleContentClick = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+
+    // Handle link clicks — open in default browser
+    const anchor = target.closest('a');
+    if (anchor) {
+      const href = anchor.getAttribute('href');
+      if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+        e.preventDefault();
+        const electronAPI = (window as any).electronAPI;
+        if (electronAPI?.openExternal) {
+          electronAPI.openExternal(href);
+        } else {
+          window.open(href, '_blank', 'noopener,noreferrer');
+        }
+        return;
+      }
+    }
+
+    // Handle image clicks — open in viewer modal
+    const img = target.closest('img');
+    if (img && img.closest('.zulip-content')) {
+      e.preventDefault();
+      setViewerImage(img.src);
+    }
+  }, []);
+
+  // Close reaction picker on click outside
+  useEffect(() => {
+    if (reactingMessageId === null) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (reactPickerRef.current && !reactPickerRef.current.contains(target)) {
+        setReactingMessageId(null);
+        setPickerPos(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [reactingMessageId]);
+
+  const scrollToBottom = useCallback((smooth = false) => {
+    bottomRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant' });
+  }, []);
+
+  const checkNearBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+  }, []);
 
   // Scroll to bottom when messages change (only for new messages at the end)
   useEffect(() => {
@@ -26,20 +92,24 @@ export function MessageList() {
     }
 
     // Otherwise scroll to bottom
-    bottomRef.current?.scrollIntoView({ behavior: hasScrolled.current ? 'smooth' : 'instant' });
+    isNearBottom.current = true;
+    scrollToBottom(hasScrolled.current);
     hasScrolled.current = true;
-  }, [messages]);
+  }, [messages, scrollToBottom]);
 
-  // Lazy loading: detect scroll to top
+  // Lazy loading: detect scroll to top + track near-bottom
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || !hasMoreMessages || loadingOlder) return;
+    if (!el) return;
 
+    isNearBottom.current = checkNearBottom();
+
+    if (!hasMoreMessages || loadingOlder) return;
     if (el.scrollTop < 100) {
       prevScrollHeight.current = el.scrollHeight;
       loadOlderMessages();
     }
-  }, [hasMoreMessages, loadingOlder, loadOlderMessages]);
+  }, [hasMoreMessages, loadingOlder, loadOlderMessages, checkNearBottom]);
 
   // Mark messages as read
   useEffect(() => {
@@ -102,13 +172,14 @@ export function MessageList() {
   const groupReactions = (message: ZulipMessage) => {
     const groups: Record<
       string,
-      { emoji_name: string; emoji_code: string; count: number; userIds: number[] }
+      { emoji_name: string; emoji_code: string; reaction_type: string; count: number; userIds: number[] }
     > = {};
     for (const r of message.reactions) {
       if (!groups[r.emoji_name]) {
         groups[r.emoji_name] = {
           emoji_name: r.emoji_name,
           emoji_code: r.emoji_code,
+          reaction_type: r.reaction_type,
           count: 0,
           userIds: [],
         };
@@ -119,8 +190,32 @@ export function MessageList() {
     return Object.values(groups);
   };
 
-  // Attempt to render emoji from name (basic mapping, falls back to name)
-  const renderEmoji = (emojiName: string, emojiCode: string) => {
+  // Build Zulip-style quote from a message
+  const handleQuote = useCallback((message: ZulipMessage) => {
+    if (!onQuote) return;
+    // Extract text from HTML content
+    const div = document.createElement('div');
+    div.innerHTML = message.content;
+    const text = div.textContent || div.innerText || '';
+    onQuote(message.sender_full_name, text.trim());
+  }, [onQuote]);
+
+  // Render emoji: unicode emoji from codepoint, or custom emoji image
+  const renderEmoji = (emojiName: string, emojiCode: string, reactionType: string) => {
+    if (reactionType === 'realm_emoji') {
+      // Look up the custom emoji source URL by ID
+      const customEmoji = realmEmoji[emojiCode];
+      if (customEmoji) {
+        return (
+          <img
+            src={resolveUrl(customEmoji.source_url)}
+            alt={`:${emojiName}:`}
+            className="size-4 object-contain inline"
+          />
+        );
+      }
+      return `:${emojiName}:`;
+    }
     try {
       const codePoints = emojiCode.split('-').map((cp) => parseInt(cp, 16));
       return String.fromCodePoint(...codePoints);
@@ -136,19 +231,45 @@ export function MessageList() {
   );
 
   // Load images with auth (Zulip requires auth for user_uploads/avatars)
+  // Re-scroll to bottom after each image loads to prevent layout shift
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
     const imgs = el.querySelectorAll<HTMLImageElement>('img.zulip-auth-img');
-    imgs.forEach(async (img) => {
+    const unloadedImgs = Array.from(imgs).filter(
+      (img) => !img.dataset.loaded
+    );
+
+    if (unloadedImgs.length === 0) return;
+
+    pendingImages.current = unloadedImgs.length;
+
+    unloadedImgs.forEach(async (img) => {
       const originalSrc = img.dataset.authSrc;
-      if (!originalSrc || img.dataset.loaded === 'true') return;
+      if (!originalSrc) return;
       img.dataset.loaded = 'true';
-      const blobUrl = await fetchAuthenticatedUrl(originalSrc);
-      img.src = blobUrl;
+
+      try {
+        const blobUrl = await fetchAuthenticatedUrl(originalSrc);
+        img.src = blobUrl;
+      } catch {
+        pendingImages.current--;
+        return;
+      }
+
+      // When the image actually renders, re-scroll if user was near bottom
+      img.onload = () => {
+        pendingImages.current--;
+        if (isNearBottom.current) {
+          scrollToBottom(false);
+        }
+      };
+      img.onerror = () => {
+        pendingImages.current--;
+      };
     });
-  }, [processedMessages, fetchAuthenticatedUrl]);
+  }, [processedMessages, fetchAuthenticatedUrl, scrollToBottom]);
 
   const renderReactions = (message: ZulipMessage) => {
     const reactionGroups = groupReactions(message);
@@ -161,12 +282,12 @@ export function MessageList() {
             onClick={() => handleReactionClick(message, rg.emoji_name)}
             className={`flex items-center gap-1 border rounded px-1.5 py-0.5 cursor-pointer ${
               currentUser && rg.userIds.includes(currentUser.user_id)
-                ? 'bg-[#5865f2]/20 border-[#5865f2]/50'
-                : 'bg-[#2e3035] hover:bg-[#3a3c42] border-[#404249]'
+                ? 'bg-brand-muted border-brand/50'
+                : 'bg-surface-secondary hover:bg-surface-hover border-surface-hover'
             }`}
           >
             <span className="text-sm">
-              {renderEmoji(rg.emoji_name, rg.emoji_code)}
+              {renderEmoji(rg.emoji_name, rg.emoji_code, rg.reaction_type)}
             </span>
             <span className="text-xs text-gray-400">{rg.count}</span>
           </button>
@@ -176,9 +297,11 @@ export function MessageList() {
   };
 
   return (
+    <>
     <div
       ref={scrollRef}
       onScroll={handleScroll}
+      onClick={handleContentClick}
       className="flex-1 min-h-0 overflow-y-auto px-4"
     >
       {/* Loading older messages indicator */}
@@ -199,8 +322,83 @@ export function MessageList() {
           return (
             <div
               key={message.id}
-              className="group hover:bg-[#2e3035] -mx-2 px-2 py-0.5"
+              className="group relative hover:bg-surface-secondary -mx-2 px-2 py-0.5"
             >
+              {/* Hover action buttons */}
+              <div className="absolute right-2 top-0 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                <div className="flex items-center gap-0.5 bg-surface-secondary border border-surface-hover rounded shadow-lg">
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+                          onClick={(e) => {
+                            if (reactingMessageId === message.id) {
+                              setReactingMessageId(null);
+                              setPickerPos(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              const pickerHeight = 384; // h-96
+                              // Position upward from the bottom of the button
+                              let bottom = window.innerHeight - rect.top + 4;
+                              // If picker would go above viewport, position downward instead
+                              if (rect.top - pickerHeight < 8) {
+                                bottom = window.innerHeight - rect.bottom - pickerHeight - 4;
+                                // Clamp so picker stays on screen
+                                if (bottom < 8) bottom = 8;
+                              }
+                              setPickerPos({
+                                right: Math.max(8, window.innerWidth - rect.right),
+                                bottom: Math.max(8, bottom),
+                              });
+                              setReactingMessageId(message.id);
+                            }
+                          }}
+                        >
+                          <SmilePlus className="size-3.5" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent><p>Add Reaction</p></TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  {onQuote && (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+                            onClick={() => handleQuote(message)}
+                          >
+                            <Quote className="size-3.5" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent><p>Quote</p></TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                </div>
+                {reactingMessageId === message.id && pickerPos && createPortal(
+                  <div
+                    ref={reactPickerRef}
+                    className="fixed z-[100]"
+                    style={{ right: pickerPos.right, bottom: pickerPos.bottom }}
+                  >
+                    <EmojiPicker
+                      onSelect={() => {}}
+                      onReact={(reaction) => {
+                        addReaction(message.id, reaction.emojiName, reaction.emojiCode, reaction.reactionType);
+                        setReactingMessageId(null);
+                        setPickerPos(null);
+                      }}
+                    />
+                  </div>,
+                  document.body
+                )}
+              </div>
               {showHeader ? (
                 <div className="flex gap-3">
                   <Avatar className="size-10 mt-0.5 flex-shrink-0">
@@ -249,6 +447,99 @@ export function MessageList() {
         })}
         <div ref={bottomRef} />
       </div>
+    </div>
+
+    {/* Image Viewer Modal */}
+    {viewerImage && (
+      <ImageViewer src={viewerImage} onClose={() => setViewerImage(null)} />
+    )}
+    </>
+  );
+}
+
+// ── Image Viewer with zoom & pan ──────────────────────
+function ImageViewer({ src, onClose }: { src: string; onClose: () => void }) {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const lastPos = useRef({ x: 0, y: 0 });
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.stopPropagation();
+    const delta = e.deltaY > 0 ? -0.15 : 0.15;
+    setScale((s) => Math.min(Math.max(0.25, s + delta), 8));
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    setDragging(true);
+    lastPos.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastPos.current.x;
+    const dy = e.clientY - lastPos.current.y;
+    lastPos.current = { x: e.clientX, y: e.clientY };
+    setTranslate((t) => ({ x: t.x + dx, y: t.y + dy }));
+  }, [dragging]);
+
+  const handleMouseUp = useCallback(() => {
+    setDragging(false);
+  }, []);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  // Reset on double click
+  const handleDoubleClick = useCallback(() => {
+    setScale(1);
+    setTranslate({ x: 0, y: 0 });
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onWheel={handleWheel}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+    >
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 text-white/70 hover:text-white text-3xl font-light z-10 size-10 flex items-center justify-center rounded-full hover:bg-white/10"
+      >
+        &times;
+      </button>
+
+      {/* Zoom indicator */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/60 text-sm bg-black/50 px-3 py-1 rounded-full">
+        {Math.round(scale * 100)}% — Scroll to zoom, drag to pan, double-click to reset
+      </div>
+
+      {/* Image */}
+      <img
+        src={src}
+        alt="Preview"
+        className="max-w-[90vw] max-h-[90vh] object-contain select-none"
+        style={{
+          transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
+          cursor: dragging ? 'grabbing' : 'grab',
+          transition: dragging ? 'none' : 'transform 0.1s ease-out',
+        }}
+        onMouseDown={handleMouseDown}
+        onDoubleClick={handleDoubleClick}
+        draggable={false}
+      />
     </div>
   );
 }

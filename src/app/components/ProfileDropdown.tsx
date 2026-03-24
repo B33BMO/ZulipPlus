@@ -14,6 +14,8 @@ interface ProfileDropdownProps {
   onThemeToggle: () => void;
   isInvisible: boolean;
   onToggleInvisible: () => void;
+  onEditStatus?: () => void;
+  onOpenSettings?: () => void;
   onLogout?: () => void;
 }
 
@@ -22,9 +24,11 @@ export function ProfileDropdown({
   onThemeToggle,
   isInvisible,
   onToggleInvisible,
+  onEditStatus,
+  onOpenSettings,
   onLogout,
 }: ProfileDropdownProps) {
-  const { currentUser, getUserStatus, resolveUrl } = useZulip();
+  const { currentUser, getUserStatus, resolveUrl, userStatusText, userStatusEmoji, realmEmoji } = useZulip();
 
   const getStatusColor = () => {
     if (isInvisible || !currentUser) return 'bg-gray-500';
@@ -53,13 +57,13 @@ export function ProfileDropdown({
             <AvatarFallback>{currentUser.full_name[0]}</AvatarFallback>
           </Avatar>
           <div
-            className={`absolute bottom-0 right-0 size-3 rounded-full border-2 border-[#313338] ${getStatusColor()}`}
+            className={`absolute bottom-0 right-0 size-3 rounded-full border-2 border-surface-primary ${getStatusColor()}`}
           />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="w-56 bg-[#111214] border-[#1e1f22] text-gray-200"
+        className="w-56 bg-surface-overlay border-surface-tertiary text-gray-200"
       >
         <div className="px-2 py-3 mb-1">
           <div className="flex items-center gap-2">
@@ -77,20 +81,35 @@ export function ProfileDropdown({
               <div className="text-xs text-gray-400 truncate">
                 {currentUser.email}
               </div>
+              {userStatusText && (
+                <div className="text-xs text-gray-300 truncate mt-0.5 flex items-center gap-1">
+                  {userStatusEmoji && (() => {
+                    if (userStatusEmoji.type === 'realm_emoji') {
+                      const custom = realmEmoji[userStatusEmoji.code];
+                      if (custom) return <img src={resolveUrl(custom.source_url)} alt="" className="size-3.5 inline" />;
+                    }
+                    try {
+                      const cps = userStatusEmoji.code.split('-').map(c => parseInt(c, 16));
+                      return <span>{String.fromCodePoint(...cps)}</span>;
+                    } catch { return null; }
+                  })()}
+                  {userStatusText}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        <DropdownMenuSeparator className="bg-[#1e1f22]" />
+        <DropdownMenuSeparator className="bg-surface-tertiary" />
 
-        <DropdownMenuItem className="focus:bg-[#5865f2] focus:text-white cursor-pointer">
+        <DropdownMenuItem onClick={onEditStatus} className="focus:bg-brand focus:text-white cursor-pointer">
           <User className="size-4 mr-2" />
           Edit Status
         </DropdownMenuItem>
 
         <DropdownMenuItem
           onClick={onToggleInvisible}
-          className="focus:bg-[#5865f2] focus:text-white cursor-pointer"
+          className="focus:bg-brand focus:text-white cursor-pointer"
         >
           {isInvisible ? (
             <>
@@ -105,11 +124,11 @@ export function ProfileDropdown({
           )}
         </DropdownMenuItem>
 
-        <DropdownMenuSeparator className="bg-[#1e1f22]" />
+        <DropdownMenuSeparator className="bg-surface-tertiary" />
 
         <DropdownMenuItem
           onClick={onThemeToggle}
-          className="focus:bg-[#5865f2] focus:text-white cursor-pointer"
+          className="focus:bg-brand focus:text-white cursor-pointer"
         >
           {theme === 'dark' ? (
             <>
@@ -124,12 +143,12 @@ export function ProfileDropdown({
           )}
         </DropdownMenuItem>
 
-        <DropdownMenuItem className="focus:bg-[#5865f2] focus:text-white cursor-pointer">
+        <DropdownMenuItem onClick={onOpenSettings} className="focus:bg-brand focus:text-white cursor-pointer">
           <Settings className="size-4 mr-2" />
           Settings
         </DropdownMenuItem>
 
-        <DropdownMenuSeparator className="bg-[#1e1f22]" />
+        <DropdownMenuSeparator className="bg-surface-tertiary" />
 
         <DropdownMenuItem
           onClick={onLogout}
