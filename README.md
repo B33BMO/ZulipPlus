@@ -83,7 +83,7 @@ npm run electron:dev
 # Build Windows installer
 npm run electron:build
 ```
-
+ 
 The installer will be output to `release/`.
 
 ## Connecting to a Zulip Server
