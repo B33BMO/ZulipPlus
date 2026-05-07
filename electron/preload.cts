@@ -19,4 +19,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
   openExternal: safeOpenExternal,
   focusWindow: () => ipcRenderer.invoke('focus-window'),
+  showNotification: (opts: { title: string; body: string; icon?: string }) =>
+    ipcRenderer.invoke('show-notification', opts),
 });

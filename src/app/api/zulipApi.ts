@@ -88,6 +88,26 @@ export class ZulipApi {
     return this.request('/realm/presence');
   }
 
+  // POST /users/me/presence — ping our own status AND receive fresh presences
+  // for all users in the realm. Zulip clients are expected to call this on a
+  // regular interval (~60s) to keep presence data warm.
+  async updatePresence(
+    status: 'active' | 'idle' = 'active',
+    pingOnly: boolean = false
+  ): Promise<GetPresenceResponse & { server_timestamp: number }> {
+    const body = this.encodeParams({
+      status,
+      ping_only: pingOnly,
+      new_user_input: status === 'active',
+      slim_presence: false,
+    });
+    return this.request('/users/me/presence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  }
+
   // ── Streams / Subscriptions ───────────────────────────
   async getSubscriptions(): Promise<GetSubscriptionsResponse> {
     return this.request('/users/me/subscriptions');

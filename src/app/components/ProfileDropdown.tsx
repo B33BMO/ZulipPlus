@@ -10,7 +10,7 @@ import {
 import { useZulip } from '../context/ZulipContext';
 
 interface ProfileDropdownProps {
-  theme: 'dark' | 'light';
+  theme: string;
   onThemeToggle: () => void;
   isInvisible: boolean;
   onToggleInvisible: () => void;
@@ -130,15 +130,15 @@ export function ProfileDropdown({
           onClick={onThemeToggle}
           className="focus:bg-brand focus:text-white cursor-pointer"
         >
-          {theme === 'dark' ? (
-            <>
-              <Sun className="size-4 mr-2" />
-              Light Mode
-            </>
-          ) : (
+          {theme === 'light' || theme === 'paper' || theme === 'solarized-light' ? (
             <>
               <Moon className="size-4 mr-2" />
               Dark Mode
+            </>
+          ) : (
+            <>
+              <Sun className="size-4 mr-2" />
+              Light Mode
             </>
           )}
         </DropdownMenuItem>

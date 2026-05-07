@@ -3,13 +3,13 @@ import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { Button } from './ui/button';
 import { useZulip } from '../context/ZulipContext';
-import { Moon, Sun, Palette, User, LogOut, Check } from 'lucide-react';
+import { Palette, User, LogOut, Check } from 'lucide-react';
 
 interface SettingsModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  theme: 'dark' | 'light';
-  onThemeChange: (theme: 'dark' | 'light') => void;
+  theme: string;
+  onThemeChange: (theme: string) => void;
   accentColor: string;
   onAccentChange: (color: string) => void;
   onLogout: () => void;
@@ -24,6 +24,28 @@ const ACCENT_PRESETS = [
   { color: '#9b59b6', name: 'Purple' },
   { color: '#e67e22', name: 'Orange' },
   { color: '#1abc9c', name: 'Teal' },
+];
+
+// Each theme has a small preview swatch: [background, surface, text, accent].
+// These mirror the values in /src/styles/theme.css so the cards look accurate
+// regardless of which theme is currently active.
+const THEME_PRESETS: {
+  id: string;
+  name: string;
+  swatch: { bg: string; surface: string; text: string; accent: string };
+}[] = [
+  { id: 'dark',            name: 'Dark',            swatch: { bg: '#313338', surface: '#2b2d31', text: '#f2f3f5', accent: '#5865f2' } },
+  { id: 'light',           name: 'Light',           swatch: { bg: '#ffffff', surface: '#f2f3f5', text: '#060607', accent: '#5865f2' } },
+  { id: 'paper',           name: 'Paper',           swatch: { bg: '#ffffff', surface: '#f5f5f5', text: '#000000', accent: '#0050d8' } },
+  { id: 'ink',             name: 'Ink',             swatch: { bg: '#000000', surface: '#0a0a0a', text: '#ffffff', accent: '#7cc5ff' } },
+  { id: 'dracula',         name: 'Dracula',         swatch: { bg: '#282a36', surface: '#21222c', text: '#f8f8f2', accent: '#bd93f9' } },
+  { id: 'catppuccin',      name: 'Catppuccin',      swatch: { bg: '#1e1e2e', surface: '#181825', text: '#cdd6f4', accent: '#cba6f7' } },
+  { id: 'gruvbox',         name: 'Gruvbox',         swatch: { bg: '#282828', surface: '#1d2021', text: '#ebdbb2', accent: '#fe8019' } },
+  { id: 'solarized-dark',  name: 'Solarized Dark',  swatch: { bg: '#002b36', surface: '#073642', text: '#eee8d5', accent: '#2aa198' } },
+  { id: 'solarized-light', name: 'Solarized Light', swatch: { bg: '#fdf6e3', surface: '#eee8d5', text: '#073642', accent: '#2aa198' } },
+  { id: 'nord',            name: 'Nord',            swatch: { bg: '#2e3440', surface: '#272c36', text: '#eceff4', accent: '#88c0d0' } },
+  { id: 'tokyo-night',     name: 'Tokyo Night',     swatch: { bg: '#1a1b26', surface: '#16161e', text: '#c0caf5', accent: '#bb9af7' } },
+  { id: 'one-dark',        name: 'One Dark',        swatch: { bg: '#282c34', surface: '#21252b', text: '#abb2bf', accent: '#c678dd' } },
 ];
 
 type Section = 'appearance' | 'account';
@@ -94,34 +116,52 @@ export function SettingsModal({
                 {/* Theme selection */}
                 <div>
                   <label className="text-sm font-medium text-text-secondary mb-3 block">Theme</label>
-                  <div className="flex gap-3">
-                    <button
-                      onClick={() => onThemeChange('dark')}
-                      className={`flex-1 p-4 rounded-lg border-2 transition-colors ${
-                        theme === 'dark'
-                          ? 'border-brand bg-brand/10'
-                          : 'border-surface-hover hover:border-text-muted'
-                      }`}
-                    >
-                      <Moon className={`size-6 mx-auto mb-2 ${theme === 'dark' ? 'text-brand' : 'text-text-muted'}`} />
-                      <span className={`text-sm block text-center ${theme === 'dark' ? 'text-brand font-medium' : 'text-text-secondary'}`}>
-                        Dark
-                      </span>
-                    </button>
-
-                    <button
-                      onClick={() => onThemeChange('light')}
-                      className={`flex-1 p-4 rounded-lg border-2 transition-colors ${
-                        theme === 'light'
-                          ? 'border-brand bg-brand/10'
-                          : 'border-surface-hover hover:border-text-muted'
-                      }`}
-                    >
-                      <Sun className={`size-6 mx-auto mb-2 ${theme === 'light' ? 'text-brand' : 'text-text-muted'}`} />
-                      <span className={`text-sm block text-center ${theme === 'light' ? 'text-brand font-medium' : 'text-text-secondary'}`}>
-                        Light
-                      </span>
-                    </button>
+                  <div className="grid grid-cols-3 gap-2">
+                    {THEME_PRESETS.map((t) => {
+                      const active = theme === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={() => onThemeChange(t.id)}
+                          className={`p-2 rounded-lg border-2 transition-colors text-left ${
+                            active ? 'border-brand' : 'border-surface-hover hover:border-text-muted'
+                          }`}
+                          title={t.name}
+                        >
+                          {/* Preview */}
+                          <div
+                            className="h-14 rounded-md mb-2 flex overflow-hidden border border-black/20"
+                            style={{ backgroundColor: t.swatch.bg }}
+                          >
+                            <div className="w-1/3 h-full" style={{ backgroundColor: t.swatch.surface }} />
+                            <div className="flex-1 flex flex-col justify-center gap-1 px-2">
+                              <div
+                                className="h-1.5 rounded-full w-4/5"
+                                style={{ backgroundColor: t.swatch.text, opacity: 0.85 }}
+                              />
+                              <div
+                                className="h-1.5 rounded-full w-2/3"
+                                style={{ backgroundColor: t.swatch.text, opacity: 0.5 }}
+                              />
+                              <div
+                                className="h-1.5 rounded-full w-1/2"
+                                style={{ backgroundColor: t.swatch.accent }}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span
+                              className={`text-xs font-medium ${
+                                active ? 'text-brand' : 'text-text-secondary'
+                              }`}
+                            >
+                              {t.name}
+                            </span>
+                            {active && <Check className="size-3.5 text-brand" />}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 

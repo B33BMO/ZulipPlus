@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, session, shell } from 'electron';
 import path from 'path';
 
 let mainWindow: BrowserWindow | null = null;
@@ -148,6 +148,26 @@ ipcMain.handle('focus-window', () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+});
+
+// Native main-process notification (more reliable on Windows than web Notification).
+ipcMain.handle('show-notification', (_evt, opts: { title: string; body: string; icon?: string }) => {
+  if (!Notification.isSupported()) return false;
+  const n = new Notification({
+    title: opts.title,
+    body: opts.body,
+    icon: opts.icon || path.join(__dirname, '../public/zulip_logo.png'),
+    silent: false,
+  });
+  n.on('click', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  n.show();
+  return true;
 });
 
 app.whenReady().then(createWindow);

@@ -2,6 +2,8 @@
   "name": "zulip",
   "private": true,
   "version": "1.0.0",
+  "description": "Zulip+ desktop client",
+  "author": "Brandon Bischoff <brandon@bmo.guru>",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -10,7 +12,8 @@
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && npm run electron:compile && electron .\"",
     "electron:preview": "npm run build && npm run electron:compile && electron .",
-    "electron:build": "npm run build && npm run electron:compile && electron-builder"
+    "electron:build": "npm run build && npm run electron:compile && electron-builder",
+    "electron:pack": "npm run build && npm run electron:compile && electron-builder --dir"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "1.1.3",
@@ -67,8 +70,17 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/__tests__/**",
+      "!**/.bin/**"
     ],
+    "npmRebuild": false,
+    "buildDependenciesFromSource": false,
+    "nodeGypRebuild": false,
     "win": {
       "target": [
         "nsis"

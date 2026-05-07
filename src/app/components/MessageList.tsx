@@ -121,20 +121,64 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     }
   }, [messages, markMessagesAsRead]);
 
-  // Rewrite relative URLs in HTML content to go through proxy
+  // Rewrite relative URLs in HTML content to go through proxy.
+  // For <img>, swap src for a placeholder and stash the real URL in data-auth-src
+  // so the auth loader (below) can fetch with credentials. Critically, we must
+  // MERGE the zulip-auth-img class into any existing class attribute — emitting
+  // a second class="..." makes browsers ignore the second one, so the loader
+  // selector `img.zulip-auth-img` wouldn't match emoji tags (which have class="emoji").
   const processContent = useCallback(
     (html: string): string => {
-      return html.replace(
-        /(<(?:img|a)\s[^>]*?)(?:src|href)="(\/[^"]+)"([^>]*?>)/g,
-        (_match, before: string, url: string, after: string) => {
-          const resolved = resolveUrl(url);
-          if (before.trim().startsWith('<img')) {
-            // Use a placeholder src and store original in data attr for auth loading
-            return `${before}src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-auth-src="${url}" class="zulip-auth-img"${after}`;
+      // Step 1: convert Zulip's unicode-emoji spans to real characters.
+      // Zulip renders `:smile:` as
+      //   <span class="emoji emoji-1f604" role="img" title="...">:smile:</span>
+      // relying on a CSS sheet that paints a background image from the
+      // `emoji-XXXX` class. Without that sheet we'd just see the literal
+      // `:smile:` text inside the span.
+      let out = html.replace(
+        /<span\b[^>]*\bclass="[^"]*\bemoji-([0-9a-f-]+)\b[^"]*"[^>]*>[^<]*<\/span>/gi,
+        (match, codepoints: string) => {
+          try {
+            const chars = codepoints
+              .split('-')
+              .map((cp) => parseInt(cp, 16))
+              .filter((n) => Number.isFinite(n));
+            if (!chars.length) return match;
+            return String.fromCodePoint(...chars);
+          } catch {
+            return match;
           }
-          return `${before}href="${resolved}"${after}`;
         }
       );
+      // Step 2: rewrite relative URLs on <img>/<a>. For <img>, swap src for a
+      // 1x1 placeholder and stash the real URL in data-auth-src so the auth
+      // loader fetches it with credentials. Merge zulip-auth-img into any
+      // existing class attribute rather than emitting a duplicate class="...".
+      out = out.replace(
+        /(<(?:img|a)\b)([^>]*?)\s(?:src|href)="(\/[^"]+)"([^>]*?>)/g,
+        (_match, tagOpen: string, beforeAttrs: string, url: string, after: string) => {
+          const resolved = resolveUrl(url);
+          if (tagOpen === '<img') {
+            const attrs = beforeAttrs + after;
+            const hasClass = /\sclass="([^"]*)"/.test(attrs);
+            let newBeforeAttrs = beforeAttrs;
+            let newAfter = after;
+            if (hasClass) {
+              const merge = (s: string) =>
+                s.replace(/\sclass="([^"]*)"/, (_m, cls) => ` class="${cls} zulip-auth-img"`);
+              newBeforeAttrs = merge(beforeAttrs);
+              newAfter = merge(after);
+            } else {
+              newAfter = ` class="zulip-auth-img"${after}`;
+            }
+            const placeholder =
+              'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+            return `${tagOpen}${newBeforeAttrs} src="${placeholder}" data-auth-src="${url}"${newAfter}`;
+          }
+          return `${tagOpen}${beforeAttrs} href="${resolved}"${after}`;
+        }
+      );
+      return out;
     },
     [resolveUrl]
   );

@@ -66,6 +66,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   const gifBtnRef = useRef<HTMLDivElement>(null);
   const gifRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+  const fileUploadRef = useRef<((file: File) => Promise<void>) | null>(null);
 
   // Filter users for mention autocomplete
   const mentionUsers = useMemo(() => {
@@ -120,9 +121,9 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         for (const item of items) {
           if (item.type.startsWith('image/') || item.type.startsWith('video/') || item.type.startsWith('application/')) {
             const file = item.getAsFile();
-            if (file && onFileUpload) {
+            if (file && fileUploadRef.current) {
               event.preventDefault();
-              handleFileUploadInternal(file);
+              fileUploadRef.current(file);
               return true;
             }
           }
@@ -174,11 +175,9 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     setUploadError(null);
     try {
       const uri = await onFileUpload(file);
-      if (file.type.startsWith('image/')) {
-        editor.chain().focus().setImage({ src: uri, alt: file.name }).run();
-      } else {
-        editor.chain().focus().insertContent(`[${file.name}](${uri})`).run();
-      }
+      // Zulip auto-previews user_uploads links; use plain link syntax (no bang)
+      // so the server renders an inline preview instead of literal markdown.
+      editor.chain().focus().insertContent(`[${file.name}](${uri}) `).run();
     } catch (err) {
       console.error('Failed to upload file:', err);
       setUploadError(`Failed to upload ${file.name}`);
@@ -187,6 +186,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       setUploading(false);
     }
   }, [editor, onFileUpload]);
+
+  // Keep ref in sync so paste handler always has the latest upload function
+  useEffect(() => {
+    fileUploadRef.current = handleFileUploadInternal;
+  }, [handleFileUploadInternal]);
 
   // Drag & drop file upload — validate file types like paste handler
   const handleDrop = useCallback((e: React.DragEvent) => {

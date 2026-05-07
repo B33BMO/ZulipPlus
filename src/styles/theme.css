@@ -116,6 +116,215 @@
   --sidebar-ring: oklch(0.439 0 0);
 }
 
+/* ── Custom themes ─────────────────────────────────────────
+   Applied via a `data-theme="<name>"` attribute on <html>.
+   Each one overrides only the tokens the UI actually reads
+   (surfaces, text, borders, brand). */
+
+/* High-contrast black-on-white */
+html[data-theme='paper'] {
+  --background: #ffffff;
+  --foreground: #000000;
+  --surface-primary: #ffffff;
+  --surface-secondary: #f5f5f5;
+  --surface-tertiary: #e5e5e5;
+  --surface-overlay: #ffffff;
+  --surface-hover: #ebebeb;
+  --surface-float: #fafafa;
+  --surface-composer: #f0f0f0;
+  --text-primary: #000000;
+  --text-secondary: #2a2a2a;
+  --text-muted: #606060;
+  --text-link: #0050d8;
+  --border: rgba(0, 0, 0, 0.15);
+}
+
+/* High-contrast white-on-black */
+html[data-theme='ink'] {
+  --background: #000000;
+  --foreground: #ffffff;
+  --surface-primary: #000000;
+  --surface-secondary: #0a0a0a;
+  --surface-tertiary: #141414;
+  --surface-overlay: #000000;
+  --surface-hover: #1e1e1e;
+  --surface-float: #0a0a0a;
+  --surface-composer: #0f0f0f;
+  --text-primary: #ffffff;
+  --text-secondary: #d4d4d4;
+  --text-muted: #9a9a9a;
+  --text-link: #7cc5ff;
+  --border: rgba(255, 255, 255, 0.18);
+}
+
+/* Dracula */
+html[data-theme='dracula'] {
+  --background: #282a36;
+  --foreground: #f8f8f2;
+  --surface-primary: #282a36;
+  --surface-secondary: #21222c;
+  --surface-tertiary: #191a21;
+  --surface-overlay: #282a36;
+  --surface-hover: #44475a;
+  --surface-float: #343746;
+  --surface-composer: #343746;
+  --text-primary: #f8f8f2;
+  --text-secondary: #d8d8d2;
+  --text-muted: #6272a4;
+  --text-link: #8be9fd;
+  --brand: #bd93f9;
+  --brand-hover: #a67ce0;
+  --brand-muted: rgba(189, 147, 249, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* Catppuccin Mocha */
+html[data-theme='catppuccin'] {
+  --background: #1e1e2e;
+  --foreground: #cdd6f4;
+  --surface-primary: #1e1e2e;
+  --surface-secondary: #181825;
+  --surface-tertiary: #11111b;
+  --surface-overlay: #1e1e2e;
+  --surface-hover: #313244;
+  --surface-float: #252537;
+  --surface-composer: #252537;
+  --text-primary: #cdd6f4;
+  --text-secondary: #bac2de;
+  --text-muted: #7f849c;
+  --text-link: #89b4fa;
+  --brand: #cba6f7;
+  --brand-hover: #b48ce7;
+  --brand-muted: rgba(203, 166, 247, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* Gruvbox Dark */
+html[data-theme='gruvbox'] {
+  --background: #282828;
+  --foreground: #ebdbb2;
+  --surface-primary: #282828;
+  --surface-secondary: #1d2021;
+  --surface-tertiary: #181a1b;
+  --surface-overlay: #282828;
+  --surface-hover: #3c3836;
+  --surface-float: #32302f;
+  --surface-composer: #32302f;
+  --text-primary: #ebdbb2;
+  --text-secondary: #d5c4a1;
+  --text-muted: #928374;
+  --text-link: #83a598;
+  --brand: #fe8019;
+  --brand-hover: #d65d0e;
+  --brand-muted: rgba(254, 128, 25, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* Solarized Dark */
+html[data-theme='solarized-dark'] {
+  --background: #002b36;
+  --foreground: #839496;
+  --surface-primary: #002b36;
+  --surface-secondary: #073642;
+  --surface-tertiary: #001f27;
+  --surface-overlay: #002b36;
+  --surface-hover: #0a3f4c;
+  --surface-float: #083743;
+  --surface-composer: #083743;
+  --text-primary: #eee8d5;
+  --text-secondary: #93a1a1;
+  --text-muted: #657b83;
+  --text-link: #268bd2;
+  --brand: #2aa198;
+  --brand-hover: #239089;
+  --brand-muted: rgba(42, 161, 152, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* Solarized Light */
+html[data-theme='solarized-light'] {
+  --background: #fdf6e3;
+  --foreground: #657b83;
+  --surface-primary: #fdf6e3;
+  --surface-secondary: #eee8d5;
+  --surface-tertiary: #e3dcc1;
+  --surface-overlay: #fdf6e3;
+  --surface-hover: #ded7bc;
+  --surface-float: #f5eed4;
+  --surface-composer: #eee8d5;
+  --text-primary: #073642;
+  --text-secondary: #586e75;
+  --text-muted: #93a1a1;
+  --text-link: #268bd2;
+  --brand: #2aa198;
+  --brand-hover: #239089;
+  --brand-muted: rgba(42, 161, 152, 0.22);
+  --border: rgba(0, 0, 0, 0.1);
+}
+
+/* Nord */
+html[data-theme='nord'] {
+  --background: #2e3440;
+  --foreground: #eceff4;
+  --surface-primary: #2e3440;
+  --surface-secondary: #272c36;
+  --surface-tertiary: #21252e;
+  --surface-overlay: #2e3440;
+  --surface-hover: #3b4252;
+  --surface-float: #353b48;
+  --surface-composer: #353b48;
+  --text-primary: #eceff4;
+  --text-secondary: #d8dee9;
+  --text-muted: #81868f;
+  --text-link: #88c0d0;
+  --brand: #88c0d0;
+  --brand-hover: #6fa7b8;
+  --brand-muted: rgba(136, 192, 208, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* Tokyo Night */
+html[data-theme='tokyo-night'] {
+  --background: #1a1b26;
+  --foreground: #c0caf5;
+  --surface-primary: #1a1b26;
+  --surface-secondary: #16161e;
+  --surface-tertiary: #13131a;
+  --surface-overlay: #1a1b26;
+  --surface-hover: #292e42;
+  --surface-float: #20212d;
+  --surface-composer: #20212d;
+  --text-primary: #c0caf5;
+  --text-secondary: #a9b1d6;
+  --text-muted: #565f89;
+  --text-link: #7aa2f7;
+  --brand: #bb9af7;
+  --brand-hover: #9f80d8;
+  --brand-muted: rgba(187, 154, 247, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+/* One Dark (Atom) */
+html[data-theme='one-dark'] {
+  --background: #282c34;
+  --foreground: #abb2bf;
+  --surface-primary: #282c34;
+  --surface-secondary: #21252b;
+  --surface-tertiary: #1b1f23;
+  --surface-overlay: #282c34;
+  --surface-hover: #2f343d;
+  --surface-float: #2c313a;
+  --surface-composer: #2c313a;
+  --text-primary: #d7dae0;
+  --text-secondary: #abb2bf;
+  --text-muted: #7f848e;
+  --text-link: #61afef;
+  --brand: #c678dd;
+  --brand-hover: #a85dbd;
+  --brand-muted: rgba(198, 120, 221, 0.22);
+  --border: rgba(255, 255, 255, 0.08);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

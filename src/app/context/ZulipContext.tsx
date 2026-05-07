@@ -138,6 +138,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   // LRU of authenticated blob URLs; declared up-front so logout can revoke them.
   const blobCache = useRef<Map<string, string>>(new Map());
   const BLOB_CACHE_MAX = 200;
+  // Zulip is pull-based for presence: we ping every 60s to keep our own
+  // presence fresh AND to receive updated peer presences in the response.
+  const presencePingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Cache of user_id → email for fast lookup inside the event loop without
+  // depending on the (potentially stale) `users` state captured by closures.
+  const userEmailByIdRef = useRef<Map<number, string>>(new Map());
 
   useEffect(() => {
     apiRef.current = api;
@@ -221,7 +227,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                       switch (n.operator) {
                         case 'stream':
                         case 'channel':
-                          // operand may be numeric (stream_id) or a string name
+                          // Operand may be either a stream name (string) or stream id (number),
+                          // depending on how the narrow was constructed. Match on both so topics
+                          // selected by id still receive live updates.
                           if (msg.type !== 'stream') return false;
                           if (typeof n.operand === 'number') return msg.stream_id === n.operand;
                           return msg.display_recipient === n.operand;
@@ -230,6 +238,14 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                           return msg.subject === n.operand;
                         case 'dm':
                         case 'pm-with': {
+                          // Compare the recipient set of the incoming message with the
+                          // narrow's recipient set. A DM narrow in Zulip specifies the
+                          // OTHER party's email(s); the message's display_recipient
+                          // always INCLUDES the current user. So we strip the current
+                          // user's email from the message side before comparing.
+                          // Using substring matching here caused a privacy bug: a
+                          // self-DM narrow (just your own email) matched any DM whose
+                          // participant list contained you.
                           if (msg.type !== 'private') return false;
                           if (!Array.isArray(msg.display_recipient)) return false;
                           // Strict set equality on emails. Narrow operand is the
@@ -285,52 +301,37 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                       }));
                     }
                   }
-                  // Desktop notification for incoming DMs.
-                  // Fire when window is unfocused, or when message belongs to a
-                  // different conversation than the one currently open.
-                  if (
-                    msg.type === 'private' &&
-                    msg.sender_id !== myId &&
-                    typeof Notification !== 'undefined' &&
-                    Notification.permission === 'granted'
-                  ) {
-                    const focused = typeof document !== 'undefined' && document.hasFocus();
-                    const shouldNotify = !focused || !matchesNarrow;
-                    if (shouldNotify) {
+                  // Desktop notification for DMs and @-mentions from other users.
+                  // Notify when not the sender AND (it's a DM OR we were mentioned).
+                  // Prefer Electron's native main-process notification (more reliable
+                  // on Windows than web Notification); fall back to web API.
+                  {
+                    const isFromMe = msg.sender_id === myId;
+                    const isMentioned = Array.isArray(me.flags) && me.flags.some((f) => f === 'mentioned' || f === 'wildcard_mentioned');
+                    const isDM = msg.type === 'private';
+                    if (!isFromMe && (isDM || isMentioned)) {
                       const div = document.createElement('div');
                       div.innerHTML = msg.content;
-                      const text = (div.textContent || div.innerText || '').trim();
-                      const body = text || '(sent an attachment)';
-                      try {
-                        const note = new Notification(msg.sender_full_name, {
-                          body: body.slice(0, 200),
-                          icon: resolveUrlFn(msg.avatar_url),
-                          tag: `zulip-dm-${msg.sender_id}`,
-                        });
-                        note.onclick = () => {
-                          const electronApi = (window as any).electronAPI;
-                          if (electronApi?.focusWindow) {
-                            electronApi.focusWindow();
-                          } else {
-                            window.focus();
-                          }
-                          note.close();
-                        };
-                      } catch {
-                        // Some platforms throw on bad icon; retry without it
-                        const note = new Notification(msg.sender_full_name, {
-                          body: body.slice(0, 200),
-                          tag: `zulip-dm-${msg.sender_id}`,
-                        });
-                        note.onclick = () => {
-                          const electronApi = (window as any).electronAPI;
-                          if (electronApi?.focusWindow) {
-                            electronApi.focusWindow();
-                          } else {
-                            window.focus();
-                          }
-                          note.close();
-                        };
+                      const text = (div.textContent || div.innerText || '').slice(0, 200) || '(sent an attachment)';
+                      const title = isDM
+                        ? msg.sender_full_name
+                        : `${msg.sender_full_name} (#${typeof msg.display_recipient === 'string' ? msg.display_recipient : ''} > ${msg.subject})`;
+                      const icon = resolveUrlFn(msg.avatar_url);
+                      const electronAPI = (window as any).electronAPI;
+                      if (electronAPI?.showNotification) {
+                        electronAPI.showNotification({ title, body: text, icon }).catch(() => {});
+                      } else if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                        try {
+                          const note = new Notification(title, { body: text, icon, tag: `zulip-${msg.id}` });
+                          note.onclick = () => {
+                            const api = (window as any).electronAPI;
+                            if (api?.focusWindow) api.focusWindow();
+                            else window.focus();
+                            note.close();
+                          };
+                        } catch {
+                          new Notification(title, { body: text });
+                        }
                       }
                     }
                   }
@@ -351,6 +352,19 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                         { userIds: sortedIds, lastMessageTimestamp: me.message.timestamp },
                         ...filtered,
                       ];
+                    });
+                  }
+                  // Bump topic to top of its stream's topic list on new stream message
+                  if (me.message.type === 'stream' && me.message.stream_id != null) {
+                    const sid = me.message.stream_id;
+                    const topicName = me.message.subject;
+                    setTopics((prev) => {
+                      const list = prev[sid] || [];
+                      const filtered = list.filter((t) => t.name !== topicName);
+                      return {
+                        ...prev,
+                        [sid]: [{ name: topicName, max_id: me.message.id }, ...filtered],
+                      };
                     });
                   }
                   break;
@@ -588,6 +602,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => {});
 
+      // Build email→userId lookup for presence updates
+      const emailMap = new Map<number, string>();
+      for (const u of usersRes.members) emailMap.set(u.user_id, u.email);
+      userEmailByIdRef.current = emailMap;
+
       // Build presence map
       const presMap: PresenceMap = {};
       for (const [email, data] of Object.entries(presenceRes.presences)) {
@@ -631,6 +650,39 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       // Start event loop in background
       startEventLoop(zApi, profile.user_id);
 
+      // Start periodic presence ping — this both reports our own activity AND
+      // fetches fresh presence for everyone. Without this, presence data is
+      // only ever the initial snapshot from login.
+      const pingPresence = async () => {
+        try {
+          const res = await zApi.updatePresence('active');
+          if (res.presences) {
+            const emailMap = userEmailByIdRef.current;
+            const byEmail = new Map<string, number>();
+            emailMap.forEach((email, uid) => byEmail.set(email, uid));
+            setPresence((prev) => {
+              const next = { ...prev };
+              for (const [email, data] of Object.entries(res.presences)) {
+                const uid = byEmail.get(email);
+                if (uid && data.aggregated) {
+                  next[uid] = {
+                    status: data.aggregated.status === 'active' ? 'online'
+                      : data.aggregated.status === 'idle' ? 'idle' : 'offline',
+                    timestamp: data.aggregated.timestamp,
+                  };
+                }
+              }
+              return next;
+            });
+          }
+        } catch (err) {
+          console.warn('Presence ping failed:', err);
+        }
+      };
+      pingPresence();
+      if (presencePingRef.current) clearInterval(presencePingRef.current);
+      presencePingRef.current = setInterval(pingPresence, 60_000);
+
       return profile;
     },
     [startEventLoop]
@@ -638,6 +690,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     eventLoopRef.current = false;
+    if (presencePingRef.current) {
+      clearInterval(presencePingRef.current);
+      presencePingRef.current = null;
+    }
     if (queueIdRef.current && apiRef.current) {
       apiRef.current.deleteEventQueue(queueIdRef.current).catch(() => {});
     }

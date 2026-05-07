@@ -34,8 +34,8 @@ function AppContent() {
     streamId: number;
     topicName: string;
   } | null>(null);
-  const [theme, setTheme] = useState<'dark' | 'light'>(
-    () => (localStorage.getItem('zulipplus_theme') as 'dark' | 'light') || 'dark'
+  const [theme, setTheme] = useState<string>(
+    () => localStorage.getItem('zulipplus_theme') || 'dark'
   );
   const [accentColor, setAccentColor] = useState<string>(
     () => localStorage.getItem('zulipplus_accent') || '#5865f2'
@@ -44,13 +44,24 @@ function AppContent() {
   const [editStatusOpen, setEditStatusOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Apply theme class to document root + persist
+  // Apply theme to document root + persist. Light-on-dark themes get the `.dark`
+  // class (so Tailwind dark: variants still work); all other themes also set a
+  // `data-theme` attribute that CSS in theme.css picks up to override tokens.
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
+    const darkThemes = new Set([
+      'dark', 'ink', 'dracula', 'catppuccin', 'gruvbox',
+      'solarized-dark', 'nord', 'tokyo-night', 'one-dark',
+    ]);
+    if (darkThemes.has(theme)) {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
+    }
+    if (theme === 'dark' || theme === 'light') {
+      root.removeAttribute('data-theme');
+    } else {
+      root.setAttribute('data-theme', theme);
     }
     localStorage.setItem('zulipplus_theme', theme);
   }, [theme]);
@@ -336,7 +347,10 @@ function AppContent() {
           {/* Profile Dropdown */}
           <ProfileDropdown
             theme={theme}
-            onThemeToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            onThemeToggle={() => {
+              const lightThemes = new Set(['light', 'paper', 'solarized-light']);
+              setTheme(lightThemes.has(theme) ? 'dark' : 'light');
+            }}
             isInvisible={isInvisible}
             onToggleInvisible={async () => {
               const newState = !isInvisible;
