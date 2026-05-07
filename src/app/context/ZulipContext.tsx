@@ -76,6 +76,9 @@ interface ZulipContextValue {
   uploadFile: (file: File) => Promise<string>;
   addReaction: (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => Promise<void>;
   removeReaction: (messageId: number, emojiName: string, emojiCode?: string, reactionType?: string) => Promise<void>;
+  editMessage: (messageId: number, content: string) => Promise<void>;
+  deleteMessage: (messageId: number) => Promise<void>;
+  getMessageRaw: (messageId: number) => Promise<string>;
   markMessagesAsRead: (messageIds: number[]) => Promise<void>;
   sendTyping: (to: number[], op: 'start' | 'stop') => Promise<void>;
   searchMessages: (query: string) => Promise<ZulipMessage[]>;
@@ -406,6 +409,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                             }),
                             ...(ue.content && { content: ue.content }),
                             ...(ue.subject && { subject: ue.subject }),
+                            last_edit_timestamp: ue.edit_timestamp,
                           }
                         : m
                     )
@@ -964,6 +968,33 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [api]
   );
 
+  // Edit/delete actions. Local message state is updated by the event-loop
+  // handlers for `update_message` and `delete_message` events that the
+  // server echoes back, so we don't optimistically mutate `messages` here.
+  const editMessage = useCallback(
+    async (messageId: number, content: string) => {
+      if (!api) return;
+      await api.editMessage(messageId, { content });
+    },
+    [api]
+  );
+
+  const deleteMessage = useCallback(
+    async (messageId: number) => {
+      if (!api) return;
+      await api.deleteMessage(messageId);
+    },
+    [api]
+  );
+
+  const getMessageRaw = useCallback(
+    async (messageId: number): Promise<string> => {
+      if (!api) return '';
+      return api.getMessageRaw(messageId);
+    },
+    [api]
+  );
+
   const markMessagesAsRead = useCallback(
     async (messageIds: number[]) => {
       if (!api || messageIds.length === 0) return;
@@ -1167,6 +1198,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         uploadFile,
         addReaction,
         removeReaction,
+        editMessage,
+        deleteMessage,
+        getMessageRaw,
         markMessagesAsRead,
         sendTyping,
         searchMessages,

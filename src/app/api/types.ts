@@ -80,6 +80,9 @@ export interface ZulipMessage {
   flags: string[];
   content_type: string;
   is_me_message: boolean;
+  // Set by Zulip when a message has been edited; used by the UI to show
+  // an "(edited)" affordance.
+  last_edit_timestamp?: number;
 }
 
 export interface ZulipDisplayRecipient {

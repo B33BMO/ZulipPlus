@@ -154,6 +154,15 @@ export class ZulipApi {
     });
   }
 
+  // Fetch the raw markdown source of a message — needed to seed the
+  // inline edit UI, since the cached `messages` array stores rendered HTML.
+  async getMessageRaw(messageId: number): Promise<string> {
+    const res = await this.request<{ result: string; msg: string; raw_content?: string }>(
+      `/messages/${messageId}?apply_markdown=false`
+    );
+    return res.raw_content ?? '';
+  }
+
   async editMessage(
     messageId: number,
     params: { content?: string; topic?: string }

@@ -4,17 +4,18 @@ import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { useZulip } from '../context/ZulipContext';
 import type { ZulipMessage } from '../api/types';
 import { format } from 'date-fns';
-import { Loader2, Quote, SmilePlus } from 'lucide-react';
+import { Loader2, Pencil, Quote, SmilePlus, Trash2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { Button } from './ui/button';
 import { EmojiPicker } from './EmojiPicker';
+import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 
 interface MessageListProps {
   onQuote?: (senderName: string, content: string) => void;
 }
 
 export function MessageList({ onQuote }: MessageListProps = {}) {
-  const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji } = useZulip();
+  const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, editMessage, deleteMessage, getMessageRaw, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji } = useZulip();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const hasScrolled = useRef(false);
@@ -25,6 +26,61 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
   const [pickerPos, setPickerPos] = useState<{ right: number; bottom: number } | null>(null);
   const reactPickerRef = useRef<HTMLDivElement>(null);
   const [viewerImage, setViewerImage] = useState<string | null>(null);
+  // Edit/delete UI state. Inline edit is a controlled textarea seeded with
+  // the raw markdown (fetched on edit-start because cached messages only
+  // store rendered HTML). Delete uses a confirm dialog because the action
+  // is irreversible and there's no undo from the server side.
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const startEdit = useCallback(async (messageId: number) => {
+    setEditingMessageId(messageId);
+    setEditDraft('');
+    try {
+      const raw = await getMessageRaw(messageId);
+      setEditDraft(raw);
+    } catch (err) {
+      console.error('Failed to fetch raw message for edit:', err);
+      setEditingMessageId(null);
+    }
+  }, [getMessageRaw]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingMessageId(null);
+    setEditDraft('');
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    if (editingMessageId === null) return;
+    const content = editDraft.trim();
+    if (!content) return;
+    setEditSaving(true);
+    try {
+      await editMessage(editingMessageId, content);
+      setEditingMessageId(null);
+      setEditDraft('');
+    } catch (err) {
+      console.error('Failed to edit message:', err);
+    } finally {
+      setEditSaving(false);
+    }
+  }, [editingMessageId, editDraft, editMessage]);
+
+  const confirmDelete = useCallback(async () => {
+    if (deleteTargetId === null) return;
+    setDeleting(true);
+    try {
+      await deleteMessage(deleteTargetId);
+      setDeleteTargetId(null);
+    } catch (err) {
+      console.error('Failed to delete message:', err);
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteTargetId, deleteMessage]);
 
   // Handle clicks on links (open external) and images (open viewer)
   const handleContentClick = useCallback((e: React.MouseEvent) => {
@@ -424,6 +480,40 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                       </Tooltip>
                     </TooltipProvider>
                   )}
+                  {currentUser && message.sender_id === currentUser.user_id && (
+                    <>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
+                              onClick={() => startEdit(message.id)}
+                            >
+                              <Pencil className="size-3.5" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent><p>Edit</p></TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-7 text-red-400 hover:text-red-300 hover:bg-surface-hover"
+                              onClick={() => setDeleteTargetId(message.id)}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent><p>Delete</p></TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </>
+                  )}
                 </div>
                 {reactingMessageId === message.id && pickerPos && createPortal(
                   <div
@@ -463,10 +553,39 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                         {formatTime(message.timestamp)}
                       </span>
                     </div>
-                    <div
-                      className="text-text-primary text-sm leading-relaxed break-words zulip-content"
-                      dangerouslySetInnerHTML={{ __html: message._html }}
-                    />
+                    {editingMessageId === message.id ? (
+                      <div className="space-y-2">
+                        <textarea
+                          autoFocus
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit(); }
+                          }}
+                          className="w-full bg-surface-tertiary text-text-primary text-sm rounded p-2 border border-surface-hover focus:border-brand outline-none font-mono resize-y min-h-[3rem]"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" onClick={saveEdit} disabled={editSaving || !editDraft.trim()}>
+                            {editSaving ? 'Saving…' : 'Save'}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={editSaving}>
+                            Cancel
+                          </Button>
+                          <span className="text-xs text-text-muted">
+                            Ctrl+Enter to save, Esc to cancel
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className="text-text-primary text-sm leading-relaxed break-words zulip-content"
+                        dangerouslySetInnerHTML={{ __html: message._html }}
+                      />
+                    )}
+                    {message.last_edit_timestamp && editingMessageId !== message.id && (
+                      <span className="text-[10px] text-text-muted ml-1">(edited)</span>
+                    )}
                     {renderReactions(message)}
                   </div>
                 </div>
@@ -478,10 +597,39 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                     </span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div
-                      className="text-text-primary text-sm leading-relaxed break-words zulip-content"
-                      dangerouslySetInnerHTML={{ __html: message._html }}
-                    />
+                    {editingMessageId === message.id ? (
+                      <div className="space-y-2">
+                        <textarea
+                          autoFocus
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit(); }
+                          }}
+                          className="w-full bg-surface-tertiary text-text-primary text-sm rounded p-2 border border-surface-hover focus:border-brand outline-none font-mono resize-y min-h-[3rem]"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" onClick={saveEdit} disabled={editSaving || !editDraft.trim()}>
+                            {editSaving ? 'Saving…' : 'Save'}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={editSaving}>
+                            Cancel
+                          </Button>
+                          <span className="text-xs text-text-muted">
+                            Ctrl+Enter to save, Esc to cancel
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className="text-text-primary text-sm leading-relaxed break-words zulip-content"
+                        dangerouslySetInnerHTML={{ __html: message._html }}
+                      />
+                    )}
+                    {message.last_edit_timestamp && editingMessageId !== message.id && (
+                      <span className="text-[10px] text-text-muted ml-1">(edited)</span>
+                    )}
                     {renderReactions(message)}
                   </div>
                 </div>
@@ -497,6 +645,24 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     {viewerImage && (
       <ImageViewer src={viewerImage} onClose={() => setViewerImage(null)} />
     )}
+
+    {/* Delete confirmation */}
+    <Dialog open={deleteTargetId !== null} onOpenChange={(o) => !o && setDeleteTargetId(null)}>
+      <DialogContent className="bg-surface-secondary border-surface-tertiary text-text-primary sm:max-w-md">
+        <DialogTitle>Delete message?</DialogTitle>
+        <DialogDescription className="text-text-secondary">
+          This permanently removes the message for everyone. This action can't be undone.
+        </DialogDescription>
+        <DialogFooter className="gap-2">
+          <Button variant="ghost" onClick={() => setDeleteTargetId(null)} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={confirmDelete} disabled={deleting}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     </>
   );
 }
