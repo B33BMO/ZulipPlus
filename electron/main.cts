@@ -40,23 +40,45 @@ function safeOpenExternal(url: string): void {
 }
 
 // Strict-ish CSP. We can't pin connect-src to a specific Zulip server because
-// users self-host, so we constrain the dangerous knobs (script execution,
-// frames, objects, base) and require https for outbound connects.
+// users self-host (and may use plain http on private networks), so we constrain
+// the dangerous knobs (script execution, frames, objects, base) and allow both
+// http and https for outbound connects/images.
 const CSP = [
   "default-src 'self'",
   // Vite's runtime + React DevTools need inline + eval in dev. In prod we
   // could tighten further; keeping inline for TipTap styles.
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
-  "media-src 'self' blob: https:",
+  "img-src 'self' data: blob: http: https:",
+  "media-src 'self' blob: http: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https: wss: ws://localhost:5173",
+  "connect-src 'self' http: https: wss: ws://localhost:5173",
   "frame-src 'none'",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
 ].join('; ');
+
+// Origin of the currently configured Zulip server (e.g. "https://zulip.example.com").
+// Set by the renderer via the `set-server-url` IPC after credentials are known.
+// Used to scope the Origin/CORS header rewrites below to that one origin instead
+// of every renderer-initiated request.
+let zulipServerOrigin: string | null = null;
+
+function urlOrigin(u: string): string | null {
+  try { return new URL(u).origin; } catch { return null; }
+}
+
+// True if the request belongs to the configured Zulip server. Pre-login
+// (no origin set yet) we allow rewrites for any http(s) request so the
+// initial login call itself can succeed.
+function isZulipBound(url: string): boolean {
+  if (!zulipServerOrigin) {
+    const o = urlOrigin(url);
+    return o ? (o.startsWith('http://') || o.startsWith('https://')) : false;
+  }
+  return urlOrigin(url) === zulipServerOrigin;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -77,14 +99,16 @@ function createWindow() {
     show: false,
   });
 
-  // CORS bypass for the Zulip API. We only rewrite headers for requests that
-  // were initiated by the renderer's own webContents, so injected content
-  // navigated into a third-party origin doesn't inherit the bypass.
+  // CORS bypass for the Zulip API. Scoped two ways:
+  //   1. webContentsId must match our window (ignore other tabs/extensions).
+  //   2. Request URL must be Zulip-bound (matches `zulipServerOrigin` once set).
+  // Without (2) we'd be force-allowing CORS on every third-party fetch the
+  // renderer makes (image CDNs, GIPHY, etc.) which is a real blast-radius bug.
   const ses = mainWindow.webContents.session;
   const ourWebContentsId = mainWindow.webContents.id;
 
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    if (details.webContentsId !== ourWebContentsId) {
+    if (details.webContentsId !== ourWebContentsId || !isZulipBound(details.url)) {
       callback({ requestHeaders: details.requestHeaders });
       return;
     }
@@ -97,7 +121,7 @@ function createWindow() {
     if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') {
       headers['Content-Security-Policy'] = [CSP];
     }
-    if (details.webContentsId === ourWebContentsId) {
+    if (details.webContentsId === ourWebContentsId && isZulipBound(details.url)) {
       headers['Access-Control-Allow-Origin'] = ['*'];
       headers['Access-Control-Allow-Headers'] = ['*'];
       headers['Access-Control-Allow-Methods'] = ['*'];
@@ -141,6 +165,15 @@ function createWindow() {
     mainWindow = null;
   });
 }
+
+// Renderer announces the configured Zulip server origin so we can scope the
+// Origin/CORS header rewrites above to that one origin. Idempotent; called
+// post-login and on auto-login from cached creds.
+ipcMain.handle('set-server-url', (_evt, url: string) => {
+  if (typeof url !== 'string') return;
+  const origin = urlOrigin(url);
+  if (origin) zulipServerOrigin = origin;
+});
 
 // Focus the main window (used by notification click handlers).
 ipcMain.handle('focus-window', () => {

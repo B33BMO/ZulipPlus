@@ -565,6 +565,15 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       // Validate credentials
       const profile = await zApi.getProfile();
 
+      // Tell main process which origin to scope the CORS/Origin header
+      // rewrites to. After this point, third-party fetches (image CDNs,
+      // GIPHY, etc.) won't get force-allowed CORS responses.
+      try {
+        (window as any).electronAPI?.setServerUrl?.(server);
+      } catch {
+        // ignore — non-Electron context
+      }
+
       // Request notification permission
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});

@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   focusWindow: () => ipcRenderer.invoke('focus-window'),
   showNotification: (opts: { title: string; body: string; icon?: string }) =>
     ipcRenderer.invoke('show-notification', opts),
+  setServerUrl: (url: string) => ipcRenderer.invoke('set-server-url', url),
 });
