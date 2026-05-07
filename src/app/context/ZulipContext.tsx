@@ -620,7 +620,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       setApi(zApi);
       setServerUrl(server);
       setCurrentUser(profile);
-      setUsers(usersRes.members.filter((u) => u.is_active));
+      // Keep deactivated users in the global list so historical DMs and
+      // mentions can still resolve their names. Call sites that show a
+      // pickable list of people (Sidebar's DM-able users, mention
+      // autocomplete) filter on `is_active` themselves.
+      setUsers(usersRes.members);
       setSubscriptions(subsRes.subscriptions);
 
       // Fetch realm custom emoji (non-blocking)

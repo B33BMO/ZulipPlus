@@ -85,7 +85,7 @@ export function Sidebar({
   };
 
   const otherUsers = users.filter(
-    (u) => u.user_id !== currentUser?.user_id && !u.is_bot
+    (u) => u.user_id !== currentUser?.user_id && !u.is_bot && u.is_active
   );
 
   // Stable key of the currently-active DM, for highlight comparisons.
