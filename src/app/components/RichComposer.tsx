@@ -43,14 +43,19 @@ interface RichComposerProps {
   onSendMessage: (content: string) => Promise<void>;
   onFileUpload?: (file: File) => Promise<string>;
   placeholder?: string;
+  // User IDs that should receive typing notifications. Null/empty means
+  // don't emit typing events (Zulip's typing API only supports DMs, not
+  // stream/topic conversations).
+  typingRecipients?: number[] | null;
 }
 
 export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(function RichComposer({
   onSendMessage,
   onFileUpload,
   placeholder = 'Type a message...',
+  typingRecipients = null,
 }, ref) {
-  const { users, currentUser } = useZulip();
+  const { users, currentUser, sendTyping } = useZulip();
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -253,12 +258,23 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     try {
       await onSendMessage(markdown);
       editor.commands.clearContent();
+      // Send the typing-stop event so the peer's "X is typing" indicator
+      // disappears immediately on send rather than after the 5s debounce.
+      if (typingActiveRef.current) {
+        const to = typingRecipientsRef.current;
+        typingActiveRef.current = false;
+        if (typingTimerRef.current) {
+          clearTimeout(typingTimerRef.current);
+          typingTimerRef.current = null;
+        }
+        if (to && to.length > 0) sendTyping(to, 'stop').catch(() => {});
+      }
     } catch (err) {
       console.error('Failed to send message:', err);
     } finally {
       setSending(false);
     }
-  }, [editor, sending, onSendMessage]);
+  }, [editor, sending, onSendMessage, sendTyping]);
 
   // Use a ref so the Enter key handler always calls the latest handleSend
   // without needing to re-register the handler on every state change
@@ -299,6 +315,51 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       editor.off('selectionUpdate', onUpdate);
     };
   }, [editor]);
+
+  // Emit Zulip typing notifications while the user is typing in a DM.
+  // Pattern: send 'start' on first non-empty edit, debounce a 'stop' after
+  // 5s of no further edits (Zulip clients re-send 'start' on activity, so
+  // a peer's "X is typing" indicator won't expire on the other side as
+  // long as we keep sending). Stream/topic conversations don't get typing
+  // notifications — typingRecipients will be null.
+  const typingActiveRef = useRef(false);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingRecipientsRef = useRef<number[] | null>(typingRecipients);
+  useEffect(() => { typingRecipientsRef.current = typingRecipients; }, [typingRecipients]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const stopTyping = () => {
+      const to = typingRecipientsRef.current;
+      typingActiveRef.current = false;
+      if (typingTimerRef.current) {
+        clearTimeout(typingTimerRef.current);
+        typingTimerRef.current = null;
+      }
+      if (to && to.length > 0) sendTyping(to, 'stop').catch(() => {});
+    };
+    const onTyping = () => {
+      const to = typingRecipientsRef.current;
+      if (!to || to.length === 0) return;
+      if (editor.isEmpty) {
+        if (typingActiveRef.current) stopTyping();
+        return;
+      }
+      if (!typingActiveRef.current) {
+        typingActiveRef.current = true;
+        sendTyping(to, 'start').catch(() => {});
+      }
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(stopTyping, 5000);
+    };
+    editor.on('update', onTyping);
+    return () => {
+      editor.off('update', onTyping);
+      // On unmount (or conversation switch — composer is keyed by it) tell
+      // the previous recipient set we've stopped typing.
+      if (typingActiveRef.current) stopTyping();
+    };
+  }, [editor, sendTyping]);
 
   // Insert a mention and close the popup
   const insertMention = useCallback((userName: string) => {

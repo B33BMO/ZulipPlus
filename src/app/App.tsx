@@ -392,6 +392,11 @@ function AppContent() {
               onSendMessage={handleSendMessage}
               onFileUpload={handleFileUpload}
               placeholder={getPlaceholder()}
+              typingRecipients={
+                activeDM && currentUser
+                  ? activeDM.filter((id) => id !== currentUser.user_id)
+                  : null
+              }
             />
           </>
         ) : (
