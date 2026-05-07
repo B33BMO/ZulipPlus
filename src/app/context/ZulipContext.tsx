@@ -235,7 +235,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                           return msg.display_recipient === n.operand;
                         case 'topic':
                         case 'subject':
-                          return msg.subject === n.operand;
+                          // Topic names are case-insensitive on the Zulip server,
+                          // so a strict === would silently drop live messages
+                          // whose subject differs only in case.
+                          return String(msg.subject).toLowerCase()
+                            === String(n.operand).toLowerCase();
                         case 'dm':
                         case 'pm-with': {
                           // Compare the recipient set of the incoming message with the
@@ -266,9 +270,22 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                         }
                         case 'is':
                           if (n.operand === 'dm' || n.operand === 'private') return msg.type === 'private';
-                          return true;
+                          if (n.operand === 'mentioned') {
+                            return Array.isArray(me.flags)
+                              && me.flags.some((f) => f === 'mentioned' || f === 'wildcard_mentioned');
+                          }
+                          if (n.operand === 'starred') {
+                            return Array.isArray(me.flags) && me.flags.includes('starred');
+                          }
+                          if (n.operand === 'unread') {
+                            return Array.isArray(me.flags) && !me.flags.includes('read');
+                          }
+                          // Unknown is:* operand — fail closed so we don't
+                          // append messages to a view that didn't ask for them.
+                          return false;
                         default:
-                          return true;
+                          // Unknown narrow operator — fail closed for safety.
+                          return false;
                       }
                     });
                   }
