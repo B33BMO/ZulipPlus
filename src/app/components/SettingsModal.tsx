@@ -59,7 +59,7 @@ export function SettingsModal({
   onAccentChange,
   onLogout,
 }: SettingsModalProps) {
-  const { currentUser, resolveUrl } = useZulip();
+  const { currentUser, resolveUrl, serverUrl } = useZulip();
   const [activeSection, setActiveSection] = useState<Section>('appearance');
   const [customHex, setCustomHex] = useState(accentColor);
 
@@ -235,9 +235,7 @@ export function SettingsModal({
                   <div className="flex justify-between items-center py-2">
                     <span className="text-sm text-text-secondary">Server</span>
                     <span className="text-sm text-text-primary font-mono">
-                      {localStorage.getItem('zulip_credentials') ?
-                        JSON.parse(localStorage.getItem('zulip_credentials') || '{}').server || 'Unknown'
-                        : 'Unknown'}
+                      {serverUrl || 'Unknown'}
                     </span>
                   </div>
                   <div className="flex justify-between items-center py-2">

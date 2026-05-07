@@ -22,4 +22,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showNotification: (opts: { title: string; body: string; icon?: string }) =>
     ipcRenderer.invoke('show-notification', opts),
   setServerUrl: (url: string) => ipcRenderer.invoke('set-server-url', url),
+  creds: {
+    available: (): Promise<boolean> => ipcRenderer.invoke('creds:available'),
+    get: <T = unknown,>(): Promise<T | null> => ipcRenderer.invoke('creds:get'),
+    set: (payload: unknown): Promise<boolean> => ipcRenderer.invoke('creds:set', payload),
+    clear: (): Promise<void> => ipcRenderer.invoke('creds:clear'),
+  },
 });

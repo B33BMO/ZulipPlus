@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ZulipApi } from '../api/zulipApi';
+import { loadCredentials, saveCredentials, clearCredentials } from '../api/credentialStore';
 import type {
   ZulipUser,
   ZulipMessage,
@@ -47,6 +48,7 @@ export function dmKey(userIds: number[]): string {
 // ── Context shape ─────────────────────────────────────
 interface ZulipContextValue {
   api: ZulipApi | null;
+  serverUrl: string;
   currentUser: ZulipUser | null;
   users: ZulipUser[];
   subscriptions: ZulipSubscription[];
@@ -706,11 +708,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
 
       setLoading(false);
 
-      // Cache credentials for auto-login
-      localStorage.setItem(
-        'zulip_credentials',
-        JSON.stringify({ server, email, apiKey })
-      );
+      // Cache credentials for auto-login. Encrypted via Electron's
+      // safeStorage when available; fallback to localStorage in
+      // browser-only dev. See src/app/api/credentialStore.ts.
+      saveCredentials({ server, email, apiKey }).catch((err) => {
+        console.warn('Failed to persist credentials:', err);
+      });
 
       // Start event loop in background
       startEventLoop(zApi, profile.user_id);
@@ -773,7 +776,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       }
     }
     blobCache.current.clear();
-    localStorage.removeItem('zulip_credentials');
+    clearCredentials().catch(() => { /* ignore */ });
     setApi(null);
     setServerUrl('');
     setCurrentUser(null);
@@ -792,23 +795,23 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     queueIdRef.current = null;
   }, []);
 
-  // Auto-login on mount if credentials are cached
+  // Auto-login on mount if credentials are cached.
+  // loadCredentials() also runs the one-time migration from plaintext
+  // localStorage into Electron's encrypted store on first launch after
+  // upgrade, see src/app/api/credentialStore.ts.
   useEffect(() => {
     if (autoLoginAttempted.current) return;
     autoLoginAttempted.current = true;
 
-    const cached = localStorage.getItem('zulip_credentials');
-    if (cached) {
-      try {
-        const { server, email, apiKey } = JSON.parse(cached);
-        login(server, email, apiKey).catch(() => {
-          // Credentials expired or invalid — clear them
-          localStorage.removeItem('zulip_credentials');
+    loadCredentials()
+      .then((cached) => {
+        if (!cached) return;
+        return login(cached.server, cached.email, cached.apiKey).catch(() => {
+          // Credentials expired or invalid — wipe them.
+          return clearCredentials();
         });
-      } catch {
-        localStorage.removeItem('zulip_credentials');
-      }
-    }
+      })
+      .catch(() => { /* swallow */ });
   }, [login]);
 
   const loadTopics = useCallback(
@@ -1176,6 +1179,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     <ZulipContext.Provider
       value={{
         api,
+        serverUrl,
         currentUser,
         users,
         subscriptions,

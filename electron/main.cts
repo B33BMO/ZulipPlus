@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, Notification, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, safeStorage, session, shell } from 'electron';
+import { promises as fsp } from 'fs';
 import path from 'path';
 
 let mainWindow: BrowserWindow | null = null;
@@ -181,6 +182,59 @@ ipcMain.handle('focus-window', () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+});
+
+// ── Credential storage ────────────────────────────────
+// We persist the Zulip API key via Electron's safeStorage (OS-level
+// encrypted: macOS Keychain, Windows DPAPI, libsecret on Linux). The
+// ciphertext lives in `<userData>/credentials.bin`. If safeStorage is
+// unavailable (e.g. headless Linux without a keyring), `set` returns
+// false so the renderer can fall back to plaintext localStorage with
+// a clear-eyed user prompt.
+function credsPath(): string {
+  return path.join(app.getPath('userData'), 'credentials.bin');
+}
+
+ipcMain.handle('creds:set', async (_evt, payload: unknown) => {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  try {
+    const json = JSON.stringify(payload);
+    const enc = safeStorage.encryptString(json);
+    await fsp.writeFile(credsPath(), enc, { mode: 0o600 });
+    return true;
+  } catch (err) {
+    console.warn('creds:set failed', err);
+    return false;
+  }
+});
+
+ipcMain.handle('creds:get', async () => {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    const buf = await fsp.readFile(credsPath());
+    const json = safeStorage.decryptString(buf);
+    return JSON.parse(json);
+  } catch (err) {
+    // ENOENT is expected on first run; everything else is logged.
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      console.warn('creds:get failed', err);
+    }
+    return null;
+  }
+});
+
+ipcMain.handle('creds:clear', async () => {
+  try {
+    await fsp.unlink(credsPath());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      console.warn('creds:clear failed', err);
+    }
+  }
+});
+
+ipcMain.handle('creds:available', () => {
+  return safeStorage.isEncryptionAvailable();
 });
 
 // Native main-process notification (more reliable on Windows than web Notification).
