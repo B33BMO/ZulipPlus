@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import DOMPurify from 'dompurify';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { useZulip } from '../context/ZulipContext';
 import type { ZulipMessage } from '../api/types';
@@ -234,7 +235,15 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
           return `${tagOpen}${beforeAttrs} href="${resolved}"${after}`;
         }
       );
-      return out;
+      // Step 3: defence-in-depth sanitisation. Zulip's server-rendered HTML
+      // is normally trusted, but a compromised or buggy server is the kind
+      // of thing this client can't otherwise defend against — and a renderer
+      // XSS would steal the API key out of localStorage. ALLOW data-auth-src
+      // on <img> so our authenticated-image loader still works.
+      return DOMPurify.sanitize(out, {
+        ADD_ATTR: ['data-auth-src', 'target'],
+        FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form'],
+      });
     },
     [resolveUrl]
   );
