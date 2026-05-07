@@ -302,14 +302,22 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                     }
                   }
                   // Desktop notification for DMs and @-mentions from other users.
-                  // Notify when not the sender AND (it's a DM OR we were mentioned).
+                  // Notify when not the sender AND (it's a DM OR we were mentioned)
+                  // AND the user is NOT actively looking at this conversation right
+                  // now. The "actively looking" gate is window-focused + tab-visible
+                  // + the message matches the open narrow — without it, every reply
+                  // in an open thread spams an OS toast.
                   // Prefer Electron's native main-process notification (more reliable
                   // on Windows than web Notification); fall back to web API.
                   {
                     const isFromMe = msg.sender_id === myId;
                     const isMentioned = Array.isArray(me.flags) && me.flags.some((f) => f === 'mentioned' || f === 'wildcard_mentioned');
                     const isDM = msg.type === 'private';
-                    if (!isFromMe && (isDM || isMentioned)) {
+                    const focused = typeof document !== 'undefined'
+                      && document.hasFocus()
+                      && document.visibilityState === 'visible';
+                    const userIsLookingAtThis = focused && matchesNarrow;
+                    if (!isFromMe && (isDM || isMentioned) && !userIsLookingAtThis) {
                       const div = document.createElement('div');
                       div.innerHTML = msg.content;
                       const text = (div.textContent || div.innerText || '').slice(0, 200) || '(sent an attachment)';
