@@ -22,7 +22,8 @@
   /* Text colors (light theme) */
   --text-primary: #060607;
   --text-secondary: #4e5058;
-  --text-muted: #80848e;
+  /* Bumped from #80848e (~3.4:1 on light surfaces — failed WCAG AA) */
+  --text-muted: #5e636c;
   --text-link: #006ce7;
   --card: #ffffff;
   --card-foreground: oklch(0.145 0 0);

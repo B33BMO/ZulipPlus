@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Hash, User, MessageSquare, Loader2 } from 'lucide-react';
+import { Hash, User, Users, MessageSquare, Loader2 } from 'lucide-react';
+import { Toaster, toast } from 'sonner';
 import { Sidebar } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
 import { RichComposer, type RichComposerHandle } from './components/RichComposer';
@@ -8,7 +9,7 @@ import { SearchBar } from './components/SearchBar';
 import { SignIn } from './components/SignIn';
 import { EditStatusModal } from './components/EditStatusModal';
 import { SettingsModal } from './components/SettingsModal';
-import { ZulipProvider, useZulip } from './context/ZulipContext';
+import { ZulipProvider, useZulip, dmKey } from './context/ZulipContext';
 
 function AppContent() {
   const {
@@ -27,7 +28,8 @@ function AppContent() {
   const composerRef = useRef<RichComposerHandle>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<'channels' | 'users'>('channels');
-  const [activeDM, setActiveDM] = useState<number | null>(null);
+  // Sorted user IDs of all participants in the active DM/huddle (includes self).
+  const [activeDM, setActiveDM] = useState<number[] | null>(null);
   const [activeTopic, setActiveTopic] = useState<{
     streamId: number;
     topicName: string;
@@ -88,25 +90,33 @@ function AppContent() {
   const navIdRef = useRef(0);
 
   const handleSelectDM = useCallback(
-    async (userId: number) => {
+    async (userIds: number[]) => {
+      if (!currentUser || userIds.length === 0) return;
       const navId = ++navIdRef.current;
-      setActiveDM(userId);
+      const sorted = userIds.slice().sort((a, b) => a - b);
+      setActiveDM(sorted);
       setActiveTopic(null);
-      const user = findUser(userId);
-      if (user) {
-        try {
-          await loadMessages([
-            { operator: 'dm', operand: user.email },
-          ]);
-        } catch (err) {
-          // Only log if this is still the active navigation
-          if (navIdRef.current === navId) {
-            console.error('Failed to load DM messages:', err);
-          }
+      // Narrow operand: comma-separated emails of OTHER participants.
+      // Self-DM is the special case where the only participant is current user.
+      const others = sorted.filter((id) => id !== currentUser.user_id);
+      const operand = others.length === 0
+        ? currentUser.email
+        : others
+            .map((id) => findUser(id)?.email)
+            .filter((e): e is string => !!e)
+            .join(',');
+      try {
+        await loadMessages([{ operator: 'dm', operand }]);
+      } catch (err) {
+        if (navIdRef.current === navId) {
+          console.error('Failed to load DM messages:', err);
+          toast.error('Couldn’t load messages', {
+            description: err instanceof Error ? err.message : undefined,
+          });
         }
       }
     },
-    [loadMessages, findUser]
+    [loadMessages, findUser, currentUser]
   );
 
   const handleSelectTopic = useCallback(
@@ -122,6 +132,9 @@ function AppContent() {
       } catch (err) {
         if (navIdRef.current === navId) {
           console.error('Failed to load topic messages:', err);
+          toast.error('Couldn’t load messages', {
+            description: err instanceof Error ? err.message : undefined,
+          });
         }
       }
     },
@@ -131,10 +144,13 @@ function AppContent() {
   const handleSendMessage = useCallback(
     async (content: string) => {
       try {
-        if (activeDM) {
+        if (activeDM && currentUser) {
+          // Self-DM: address to self. Otherwise, address to the OTHER participants.
+          const others = activeDM.filter((id) => id !== currentUser.user_id);
+          const to = others.length === 0 ? [currentUser.user_id] : others;
           await sendMessage({
             type: 'direct',
-            to: [activeDM],
+            to,
             content,
           });
         } else if (activeTopic) {
@@ -152,14 +168,26 @@ function AppContent() {
         }
       } catch (err) {
         console.error('Failed to send message:', err);
+        toast.error('Message failed to send', {
+          description: err instanceof Error ? err.message : undefined,
+        });
+        throw err;
       }
     },
-    [activeDM, activeTopic, sendMessage, subscriptions]
+    [activeDM, activeTopic, sendMessage, subscriptions, currentUser]
   );
 
   const handleFileUpload = useCallback(
     async (file: File) => {
-      return uploadFile(file);
+      try {
+        return await uploadFile(file);
+      } catch (err) {
+        console.error('Upload failed:', err);
+        toast.error('Upload failed', {
+          description: err instanceof Error ? err.message : undefined,
+        });
+        throw err;
+      }
     },
     [uploadFile]
   );
@@ -176,15 +204,57 @@ function AppContent() {
     return <SignIn />;
   }
 
+  // Names of the OTHER participants in a DM/huddle (in user_id order).
+  const dmOtherNames = (userIds: number[]): string[] => {
+    if (!currentUser) return [];
+    return userIds
+      .filter((id) => id !== currentUser.user_id)
+      .map((id) => findUser(id)?.full_name)
+      .filter(Boolean) as string[];
+  };
+
+  // Compact label for the header / placeholder. Caps at 2 names for groups.
+  // Self-DM: "<your name> (you)". Solo: "Alice". Small group (≤3): full list.
+  // Large group (4+): "Alice, Bob +N others".
+  const dmShortLabel = (userIds: number[]): string => {
+    if (!currentUser) return 'Direct Message';
+    const others = dmOtherNames(userIds);
+    if (others.length === 0) return `${currentUser.full_name} (you)`;
+    if (others.length <= 3) return others.join(', ');
+    const head = others.slice(0, 2).join(', ');
+    return `${head} +${others.length - 2} others`;
+  };
+
+  // Full participant list, used as a hover tooltip for groups.
+  const dmFullLabel = (userIds: number[]): string => {
+    const others = dmOtherNames(userIds);
+    if (others.length === 0) return '';
+    return others.join(', ');
+  };
+
+  // Used internally for placeholder; same as dmShortLabel but inline-ready.
+  const dmTitle = dmShortLabel;
+
   // Get current header info
   const getHeaderContent = () => {
     if (activeDM) {
-      const user = findUser(activeDM);
+      const others = currentUser
+        ? activeDM.filter((id) => id !== currentUser.user_id)
+        : activeDM;
+      const isGroup = others.length > 1;
+      const fullList = isGroup ? dmFullLabel(activeDM) : undefined;
       return (
         <>
-          <User className="size-5 text-gray-400" />
-          <h2 className="font-semibold text-white">
-            {user?.full_name || 'Direct Message'}
+          {isGroup ? (
+            <Users className="size-5 text-text-secondary shrink-0" />
+          ) : (
+            <User className="size-5 text-text-secondary shrink-0" />
+          )}
+          <h2
+            className="font-semibold text-text-primary truncate min-w-0"
+            title={fullList}
+          >
+            {dmShortLabel(activeDM)}
           </h2>
         </>
       );
@@ -195,23 +265,30 @@ function AppContent() {
       );
       return (
         <>
-          <Hash className="size-5" style={{ color: stream?.color || '#888' }} />
-          <h2 className="font-semibold text-white">
+          <Hash className="size-5 shrink-0" style={{ color: stream?.color || '#888' }} />
+          <h2 className="font-semibold text-text-primary truncate min-w-0">
             {stream?.name}{' '}
-            <span className="text-gray-400 font-normal">
+            <span className="text-text-secondary font-normal">
               / {activeTopic.topicName}
             </span>
           </h2>
         </>
       );
     }
-    return <h2 className="font-semibold text-white">Welcome to Zulip</h2>;
+    return <h2 className="font-semibold text-text-primary">Welcome to Zulip</h2>;
   };
 
-  // Get typing indicator text
+  // Get typing indicator text — only for the conversation currently open.
   const getTypingIndicator = () => {
     if (!activeDM && !activeTopic) return null;
+    const expectedKey = activeDM
+      ? `dm:${dmKey(activeDM)}`
+      : activeTopic
+      ? `stream:${activeTopic.streamId}:${activeTopic.topicName}`
+      : null;
+    if (!expectedKey) return null;
     const typing = typingUsers
+      .filter((t) => t.conversationKey === expectedKey)
       .map((t) => users.find((u) => u.user_id === t.userId))
       .filter(Boolean);
     if (typing.length === 0) return null;
@@ -224,8 +301,7 @@ function AppContent() {
 
   const getPlaceholder = () => {
     if (activeDM) {
-      const user = findUser(activeDM);
-      return `Message ${user?.full_name || ''}`;
+      return `Message ${dmTitle(activeDM)}`;
     }
     if (activeTopic) {
       return `Message #${subscriptions.find((s) => s.stream_id === activeTopic.streamId)?.name} > ${activeTopic.topicName}`;
@@ -252,8 +328,8 @@ function AppContent() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {/* Top Bar */}
-        <div className="h-12 border-b border-surface-tertiary px-4 flex items-center justify-between bg-surface-primary flex-shrink-0">
-          <div className="flex-1 flex items-center gap-3">
+        <div className="h-12 border-b border-surface-tertiary px-4 flex items-center justify-between bg-surface-primary flex-shrink-0 gap-3">
+          <div className="flex-1 min-w-0 flex items-center gap-3">
             {getHeaderContent()}
           </div>
 
@@ -284,20 +360,20 @@ function AppContent() {
           <>
             {loading ? (
               <div className="flex-1 flex items-center justify-center">
-                <Loader2 className="size-8 text-gray-400 animate-spin" />
+                <Loader2 className="size-8 text-text-secondary animate-spin" />
               </div>
             ) : (
               <MessageList onQuote={handleQuote} />
             )}
             {typingText && (
               <div className="px-4 py-1">
-                <span className="text-xs text-gray-400 italic">
+                <span className="text-xs text-text-secondary italic">
                   {typingText}
                 </span>
               </div>
             )}
             <RichComposer
-              key={`composer-${activeDM || ''}-${activeTopic?.streamId || ''}-${activeTopic?.topicName || ''}`}
+              key={`composer-${activeDM ? dmKey(activeDM) : ''}-${activeTopic?.streamId || ''}-${activeTopic?.topicName || ''}`}
               ref={composerRef}
               onSendMessage={handleSendMessage}
               onFileUpload={handleFileUpload}
@@ -307,11 +383,11 @@ function AppContent() {
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
-              <MessageSquare className="size-16 text-gray-600 mx-auto mb-4" />
-              <h3 className="text-2xl font-semibold text-white mb-2">
+              <MessageSquare className="size-16 text-text-muted mx-auto mb-4" />
+              <h3 className="text-2xl font-semibold text-text-primary mb-2">
                 Welcome to Zulip
               </h3>
-              <p className="text-gray-400">
+              <p className="text-text-secondary">
                 Select a channel or user from the sidebar to start chatting
               </p>
             </div>
@@ -329,6 +405,12 @@ function AppContent() {
         accentColor={accentColor}
         onAccentChange={setAccentColor}
         onLogout={handleLogout}
+      />
+      <Toaster
+        theme={theme}
+        position="bottom-right"
+        richColors
+        closeButton
       />
     </div>
   );

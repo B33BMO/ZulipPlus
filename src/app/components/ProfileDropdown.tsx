@@ -63,7 +63,7 @@ export function ProfileDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="w-56 bg-surface-overlay border-surface-tertiary text-gray-200"
+        className="w-56 bg-surface-overlay border-surface-tertiary text-text-primary"
       >
         <div className="px-2 py-3 mb-1">
           <div className="flex items-center gap-2">
@@ -75,14 +75,14 @@ export function ProfileDropdown({
               <AvatarFallback>{currentUser.full_name[0]}</AvatarFallback>
             </Avatar>
             <div className="flex-1 min-w-0">
-              <div className="font-semibold text-white truncate">
+              <div className="font-semibold text-text-primary truncate">
                 {currentUser.full_name}
               </div>
-              <div className="text-xs text-gray-400 truncate">
+              <div className="text-xs text-text-secondary truncate">
                 {currentUser.email}
               </div>
               {userStatusText && (
-                <div className="text-xs text-gray-300 truncate mt-0.5 flex items-center gap-1">
+                <div className="text-xs text-text-secondary truncate mt-0.5 flex items-center gap-1">
                   {userStatusEmoji && (() => {
                     if (userStatusEmoji.type === 'realm_emoji') {
                       const custom = realmEmoji[userStatusEmoji.code];

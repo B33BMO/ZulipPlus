@@ -24,7 +24,7 @@ export function SignIn() {
       <div className="size-full flex items-center justify-center bg-surface-primary">
         <div className="text-center">
           <div className="size-10 border-3 border-brand border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-400 text-sm">Signing in...</p>
+          <p className="text-text-secondary text-sm">Signing in...</p>
         </div>
       </div>
     );
@@ -57,10 +57,10 @@ export function SignIn() {
         <div className="bg-surface-secondary rounded-lg p-8 shadow-2xl">
           {/* Header */}
           <div className="text-center mb-8">
-            <h1 className="text-2xl font-bold text-white mb-2">
+            <h1 className="text-2xl font-bold text-text-primary mb-2">
               Welcome to Zulip
             </h1>
-            <p className="text-gray-400 text-sm">
+            <p className="text-text-secondary text-sm">
               Sign in to your workspace
             </p>
           </div>
@@ -69,18 +69,18 @@ export function SignIn() {
           <form onSubmit={handleSubmit} className="space-y-5">
             {/* Server URL */}
             <div className="space-y-2">
-              <Label htmlFor="server" className="text-gray-300 text-xs uppercase font-semibold">
+              <Label htmlFor="server" className="text-text-primary text-xs uppercase font-semibold">
                 Server URL
               </Label>
               <div className="relative">
-                <Server className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-gray-500" />
+                <Server className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-text-muted" />
                 <Input
                   id="server"
                   type="text"
                   placeholder="https://yourorg.zulipchat.com"
                   value={server}
                   onChange={(e) => setServer(e.target.value)}
-                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-text-primary placeholder:text-text-muted focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
@@ -88,18 +88,18 @@ export function SignIn() {
 
             {/* Email */}
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-gray-300 text-xs uppercase font-semibold">
+              <Label htmlFor="email" className="text-text-primary text-xs uppercase font-semibold">
                 Email
               </Label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-gray-500" />
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-text-muted" />
                 <Input
                   id="email"
                   type="email"
                   placeholder="your.email@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-text-primary placeholder:text-text-muted focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
@@ -107,22 +107,22 @@ export function SignIn() {
 
             {/* API Key */}
             <div className="space-y-2">
-              <Label htmlFor="apiKey" className="text-gray-300 text-xs uppercase font-semibold">
+              <Label htmlFor="apiKey" className="text-text-primary text-xs uppercase font-semibold">
                 API Key
               </Label>
               <div className="relative">
-                <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-gray-500" />
+                <Key className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-text-muted" />
                 <Input
                   id="apiKey"
                   type="password"
                   placeholder="Enter your API key"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-gray-200 placeholder:text-gray-500 focus-visible:ring-1 focus-visible:ring-brand h-11"
+                  className="pl-11 bg-surface-tertiary border-surface-tertiary text-text-primary placeholder:text-text-muted focus-visible:ring-1 focus-visible:ring-brand h-11"
                   disabled={loading}
                 />
               </div>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-text-muted">
                 You can find your API key in your Zulip account settings
               </p>
             </div>
@@ -156,7 +156,7 @@ export function SignIn() {
 
           {/* Help Text */}
           <div className="mt-6 pt-6 border-t border-surface-tertiary">
-            <p className="text-xs text-gray-500 text-center">
+            <p className="text-xs text-text-muted text-center">
               Don't have an API key?{' '}
               <a
                 href="https://zulip.com/api/api-keys"

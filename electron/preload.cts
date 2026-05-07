@@ -1,8 +1,22 @@
-import { contextBridge, shell } from 'electron';
+import { contextBridge, ipcRenderer, shell } from 'electron';
 
-// Expose a minimal API to the renderer process
+// Allow-list URL schemes that we are willing to hand to the OS.
+const SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+
+function safeOpenExternal(url: string): void {
+  try {
+    const proto = new URL(url).protocol;
+    if (!SAFE_PROTOCOLS.has(proto)) return;
+    shell.openExternal(url);
+  } catch {
+    // not a parseable URL — drop it
+  }
+}
+
+// Expose a minimal API to the renderer process.
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   isElectron: true,
-  openExternal: (url: string) => shell.openExternal(url),
+  openExternal: safeOpenExternal,
+  focusWindow: () => ipcRenderer.invoke('focus-window'),
 });

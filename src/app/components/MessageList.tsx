@@ -289,7 +289,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
             <span className="text-sm">
               {renderEmoji(rg.emoji_name, rg.emoji_code, rg.reaction_type)}
             </span>
-            <span className="text-xs text-gray-400">{rg.count}</span>
+            <span className="text-xs text-text-secondary">{rg.count}</span>
           </button>
         ))}
       </div>
@@ -307,7 +307,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       {/* Loading older messages indicator */}
       {loadingOlder && (
         <div className="flex justify-center py-3">
-          <Loader2 className="size-5 text-gray-400 animate-spin" />
+          <Loader2 className="size-5 text-text-secondary animate-spin" />
         </div>
       )}
 
@@ -333,7 +333,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-7 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+                          className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
                           onClick={(e) => {
                             if (reactingMessageId === message.id) {
                               setReactingMessageId(null);
@@ -370,7 +370,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="size-7 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+                            className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
                             onClick={() => handleQuote(message)}
                           >
                             <Quote className="size-3.5" />
@@ -412,15 +412,15 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                   </Avatar>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2 mb-0.5">
-                      <span className="font-semibold text-white text-sm">
+                      <span className="font-semibold text-text-primary text-sm">
                         {message.sender_full_name}
                       </span>
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-text-muted">
                         {formatTime(message.timestamp)}
                       </span>
                     </div>
                     <div
-                      className="text-gray-200 text-sm leading-relaxed break-words zulip-content"
+                      className="text-text-primary text-sm leading-relaxed break-words zulip-content"
                       dangerouslySetInnerHTML={{ __html: message._html }}
                     />
                     {renderReactions(message)}
@@ -429,13 +429,13 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
               ) : (
                 <div className="flex gap-3">
                   <div className="w-10 flex-shrink-0 flex items-center justify-end">
-                    <span className="text-xs text-gray-500 opacity-0 group-hover:opacity-100">
+                    <span className="text-xs text-text-muted opacity-0 group-hover:opacity-100">
                       {format(new Date(message.timestamp * 1000), 'h:mm a')}
                     </span>
                   </div>
                   <div className="flex-1 min-w-0">
                     <div
-                      className="text-gray-200 text-sm leading-relaxed break-words zulip-content"
+                      className="text-text-primary text-sm leading-relaxed break-words zulip-content"
                       dangerouslySetInnerHTML={{ __html: message._html }}
                     />
                     {renderReactions(message)}
