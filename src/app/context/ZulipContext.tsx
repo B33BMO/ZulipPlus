@@ -552,7 +552,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                 reg = await zApi.registerEventQueue();
                 queueIdRef.current = reg.queue_id;
                 lastEventId = reg.last_event_id;
-                processInitialUnread(reg, myId);
+                // Prefer the live ref over the captured `myId` argument:
+                // on a re-register after a network blip the original arg may
+                // be stale (e.g. undefined if login raced the first call).
+                processInitialUnread(reg, currentUserRef.current?.user_id ?? myId);
                 continue;
               } catch (reRegErr) {
                 console.error('Failed to re-register event queue', reRegErr);
@@ -604,8 +607,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         Notification.requestPermission().catch(() => {});
       }
 
-      // Fetch initial data in parallel
-      const [usersRes, subsRes, presenceRes, dmRes] = await Promise.all([
+      // Fetch initial data in parallel. Users + subscriptions are required
+      // to render the sidebar; presence and recent-DM history are best-effort
+      // (Zulip's /realm/presence in particular is its flakiest endpoint, and
+      // a transient 500 there shouldn't bounce the user back to the sign-in
+      // page and clear their cached credentials).
+      const [usersR, subsR, presenceR, dmR] = await Promise.allSettled([
         zApi.getUsers(),
         zApi.getSubscriptions(),
         zApi.getRealmPresence(),
@@ -616,6 +623,22 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
           anchor: 'newest',
         }),
       ]);
+      if (usersR.status !== 'fulfilled') throw usersR.reason;
+      if (subsR.status !== 'fulfilled') throw subsR.reason;
+      const usersRes = usersR.value;
+      const subsRes = subsR.value;
+      const presenceRes = presenceR.status === 'fulfilled'
+        ? presenceR.value
+        : { result: 'success', msg: '', presences: {} };
+      const dmRes = dmR.status === 'fulfilled'
+        ? dmR.value
+        : { result: 'success', msg: '', messages: [], found_anchor: false, found_oldest: true, found_newest: true };
+      if (presenceR.status !== 'fulfilled') {
+        console.warn('Initial /realm/presence failed; presence will populate on first ping', presenceR.reason);
+      }
+      if (dmR.status !== 'fulfilled') {
+        console.warn('Initial DM history fetch failed; sidebar will populate as DMs arrive', dmR.reason);
+      }
 
       setApi(zApi);
       setServerUrl(server);
