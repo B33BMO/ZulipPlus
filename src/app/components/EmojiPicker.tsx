@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { Search, X } from 'lucide-react';
 import { Input } from './ui/input';
 import { useZulip } from '../context/ZulipContext';
@@ -113,27 +113,22 @@ function emojiToCodepoint(emoji: string): string {
 }
 
 export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
-  const { api, resolveUrl } = useZulip();
+  const { resolveUrl, realmEmoji } = useZulip();
   const [search, setSearch] = useState('');
-  const [customEmojis, setCustomEmojis] = useState<CustomEmoji[]>([]);
   const [activeCategory, setActiveCategory] = useState('Smileys');
 
-  // Fetch custom server emojis
-  useEffect(() => {
-    if (!api) return;
-    (async () => {
-      try {
-        const res = await (api as any).request<{
-          result: string;
-          emoji: Record<string, CustomEmoji>;
-        }>('/realm/emoji');
-        const emojis = Object.values(res.emoji).filter((e) => !e.deactivated);
-        setCustomEmojis(emojis);
-      } catch {
-        // Custom emojis not available
-      }
-    })();
-  }, [api]);
+  // Custom server emoji is fetched once at login and stored on the
+  // context — no per-mount network call needed. Project the
+  // {id → {name, source_url}} map back into the local CustomEmoji shape.
+  const customEmojis = useMemo<CustomEmoji[]>(
+    () => Object.entries(realmEmoji).map(([id, info]) => ({
+      id,
+      name: info.name,
+      source_url: info.source_url,
+      deactivated: false,
+    })),
+    [realmEmoji]
+  );
 
   const filteredCategories = useMemo(() => {
     if (!search.trim()) return EMOJI_CATEGORIES;

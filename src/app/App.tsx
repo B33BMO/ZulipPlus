@@ -224,16 +224,18 @@ function AppContent() {
       .filter(Boolean) as string[];
   };
 
-  // Compact label for the header / placeholder. Caps at 2 names for groups.
-  // Self-DM: "<your name> (you)". Solo: "Alice". Small group (≤3): full list.
-  // Large group (4+): "Alice, Bob +N others".
+  // Compact label for the header / placeholder. Self-DM: "<your name>
+  // (you)". Solo: "Alice". Small group (≤3): full list. Large group (4+):
+  // "Alice, Bob +N more" — "more" instead of "others" so the count
+  // unambiguously refers to the unshown remainder rather than the total
+  // group size.
   const dmShortLabel = (userIds: number[]): string => {
     if (!currentUser) return 'Direct Message';
     const others = dmOtherNames(userIds);
     if (others.length === 0) return `${currentUser.full_name} (you)`;
     if (others.length <= 3) return others.join(', ');
     const head = others.slice(0, 2).join(', ');
-    return `${head} +${others.length - 2} others`;
+    return `${head} +${others.length - 2} more`;
   };
 
   // Full participant list, used as a hover tooltip for groups.

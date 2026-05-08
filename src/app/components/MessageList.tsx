@@ -22,7 +22,6 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
   const hasScrolled = useRef(false);
   const prevScrollHeight = useRef(0);
   const isNearBottom = useRef(true);
-  const pendingImages = useRef(0);
   const [reactingMessageId, setReactingMessageId] = useState<number | null>(null);
   const [pickerPos, setPickerPos] = useState<{ right: number; bottom: number } | null>(null);
   const reactPickerRef = useRef<HTMLDivElement>(null);
@@ -378,8 +377,6 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
 
     if (unloadedImgs.length === 0) return;
 
-    pendingImages.current = unloadedImgs.length;
-
     unloadedImgs.forEach(async (img) => {
       const originalSrc = img.dataset.authSrc;
       if (!originalSrc) return;
@@ -389,19 +386,12 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
         const blobUrl = await fetchAuthenticatedUrl(originalSrc);
         img.src = blobUrl;
       } catch {
-        pendingImages.current--;
         return;
       }
 
-      // When the image actually renders, re-scroll if user was near bottom
+      // When the image actually renders, re-scroll if user was near bottom.
       img.onload = () => {
-        pendingImages.current--;
-        if (isNearBottom.current) {
-          scrollToBottom(false);
-        }
-      };
-      img.onerror = () => {
-        pendingImages.current--;
+        if (isNearBottom.current) scrollToBottom(false);
       };
     });
   }, [processedMessages, fetchAuthenticatedUrl, scrollToBottom]);
