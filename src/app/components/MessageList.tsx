@@ -82,33 +82,56 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     }
   }, [deleteTargetId, deleteMessage]);
 
-  // Handle clicks on links (open external) and images (open viewer)
+  // Handle clicks on links (open external) and images (open viewer).
+  // Image takes priority over a wrapping anchor: Zulip renders inline
+  // images as <a href="/user_uploads/..."><img src="/user_uploads/..."></a>,
+  // so a naive link-first check would either pop the system browser
+  // (Electron prod, absolute href) or navigate the renderer away from the
+  // app (dev, relative /zulip-api/...) — both wrong.
   const handleContentClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
+    if (!target.closest('.zulip-content')) return;
 
-    // Handle link clicks — open in default browser
+    const img = target.closest('img');
+    if (img) {
+      e.preventDefault();
+      e.stopPropagation();
+      // After the auth-loader effect runs, img.src holds the blob URL.
+      // If the user clicks before that completes, fall back to the stashed
+      // data-auth-src and fetch on demand.
+      if (img.src && !img.src.startsWith('data:')) {
+        setViewerImage(img.src);
+      } else {
+        const authSrc = img.getAttribute('data-auth-src');
+        if (authSrc) {
+          fetchAuthenticatedUrl(authSrc)
+            .then((blobUrl) => setViewerImage(blobUrl))
+            .catch(() => { /* ignore */ });
+        }
+      }
+      return;
+    }
+
     const anchor = target.closest('a');
     if (anchor) {
       const href = anchor.getAttribute('href');
-      if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-        e.preventDefault();
-        const electronAPI = (window as any).electronAPI;
+      // Always preventDefault — a relative href would otherwise navigate
+      // the whole renderer away from the app, even if we don't recognise
+      // the scheme.
+      e.preventDefault();
+      if (!href) return;
+      if (href.startsWith('http://') || href.startsWith('https://')) {
+        const electronAPI = (window as { electronAPI?: { openExternal?: (url: string) => void } }).electronAPI;
         if (electronAPI?.openExternal) {
           electronAPI.openExternal(href);
         } else {
           window.open(href, '_blank', 'noopener,noreferrer');
         }
-        return;
       }
+      // Other schemes (mailto:, #narrow/...) are intentionally swallowed
+      // for now — we can wire internal narrow navigation as a follow-up.
     }
-
-    // Handle image clicks — open in viewer modal
-    const img = target.closest('img');
-    if (img && img.closest('.zulip-content')) {
-      e.preventDefault();
-      setViewerImage(img.src);
-    }
-  }, []);
+  }, [fetchAuthenticatedUrl]);
 
   // Close reaction picker on click outside
   useEffect(() => {
