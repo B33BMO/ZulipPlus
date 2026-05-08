@@ -51,12 +51,26 @@ export function EditStatusModal({ open, onOpenChange }: EditStatusModalProps) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await updateUserStatus({
-        status_text: text,
-        emoji_name: emoji?.name || '',
-        emoji_code: emoji?.code || '',
-        reaction_type: emoji?.type || '',
-      });
+      // Zulip's POST /users/me/status rejects reaction_type='' (must be
+      // 'unicode_emoji' or 'realm_emoji'). When the user wants to clear
+      // the emoji we send empty emoji_name + emoji_code and OMIT
+      // reaction_type — encodeParams drops undefined fields. When an
+      // emoji is set we send all three together.
+      await updateUserStatus(
+        emoji
+          ? {
+              status_text: text,
+              emoji_name: emoji.name,
+              emoji_code: emoji.code,
+              reaction_type: emoji.type,
+            }
+          : {
+              status_text: text,
+              emoji_name: '',
+              emoji_code: '',
+              reaction_type: undefined,
+            }
+      );
       onOpenChange(false);
     } catch (err) {
       console.error('Failed to update status:', err);
@@ -68,11 +82,13 @@ export function EditStatusModal({ open, onOpenChange }: EditStatusModalProps) {
   const handleClear = async () => {
     setSaving(true);
     try {
+      // Same reasoning as handleSave: omit reaction_type when clearing,
+      // since Zulip rejects an empty value for it.
       await updateUserStatus({
         status_text: '',
         emoji_name: '',
         emoji_code: '',
-        reaction_type: '',
+        reaction_type: undefined,
       });
       setText('');
       setEmoji(null);

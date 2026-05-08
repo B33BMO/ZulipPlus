@@ -83,7 +83,7 @@ interface ZulipContextValue {
   getMessageRaw: (messageId: number) => Promise<string>;
   markMessagesAsRead: (messageIds: number[]) => Promise<void>;
   sendTyping: (to: number[], op: 'start' | 'stop') => Promise<void>;
-  searchMessages: (query: string) => Promise<ZulipMessage[]>;
+  searchMessages: (query: string, signal?: AbortSignal) => Promise<ZulipMessage[]>;
   getUserStatus: (userId: number) => UserStatus;
   userStatusText: string;
   userStatusEmoji: { name: string; code: string; type: string } | null;
@@ -1073,12 +1073,13 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   const searchMessages = useCallback(
-    async (query: string): Promise<ZulipMessage[]> => {
+    async (query: string, signal?: AbortSignal): Promise<ZulipMessage[]> => {
       if (!api) return [];
       const res = await api.getMessages({
         narrow: [{ operator: 'search', operand: query }],
         num_before: 50,
         num_after: 0,
+        signal,
       });
       return res.messages;
     },

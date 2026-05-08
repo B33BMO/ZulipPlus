@@ -72,10 +72,18 @@ export class ZulipApi {
 
   // ── Auth ──────────────────────────────────────────────
   async getProfile(): Promise<ZulipUser> {
-    const res = await this.request<{ result: string; msg: string } & ZulipUser>(
+    const res = await this.request<{ result: string; msg: string } & Partial<ZulipUser>>(
       '/users/me'
     );
-    return res;
+    // Older Zulip versions nest the user object differently or omit fields
+    // we depend on. Validate the shape so downstream code can rely on
+    // user_id / email being present without ?-chaining everywhere.
+    if (typeof res.user_id !== 'number' || typeof res.email !== 'string') {
+      throw new Error(
+        '/users/me response is missing user_id or email — incompatible Zulip server version'
+      );
+    }
+    return res as ZulipUser;
   }
 
   // ── Users ─────────────────────────────────────────────
@@ -124,6 +132,7 @@ export class ZulipApi {
     num_before?: number;
     num_after?: number;
     apply_markdown?: boolean;
+    signal?: AbortSignal;
   }): Promise<GetMessagesResponse> {
     const query = this.encodeParams({
       narrow: params.narrow,
@@ -132,7 +141,7 @@ export class ZulipApi {
       num_after: params.num_after ?? 0,
       apply_markdown: params.apply_markdown ?? true,
     });
-    return this.request(`/messages?${query}`);
+    return this.request(`/messages?${query}`, { signal: params.signal });
   }
 
   async sendMessage(params: {

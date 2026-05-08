@@ -49,13 +49,19 @@ export function SearchBar({ onNavigateToStream, onNavigateToDm }: SearchBarProps
       setSearching(true);
       setShowResults(true);
       try {
-        const msgs = await searchMessages(q);
+        // Plumb the AbortSignal all the way to fetch so a superseded
+        // search actually cancels the network request — previously the
+        // abort only suppressed the result render.
+        const msgs = await searchMessages(q, controller.signal);
         if (!controller.signal.aborted) {
           setResults(msgs);
         }
-      } catch {
+      } catch (err) {
+        // AbortError from a superseded request isn't a failure to report.
         if (!controller.signal.aborted) {
-          setResults([]);
+          if ((err as { name?: string })?.name !== 'AbortError') {
+            setResults([]);
+          }
         }
       } finally {
         if (!controller.signal.aborted) {
