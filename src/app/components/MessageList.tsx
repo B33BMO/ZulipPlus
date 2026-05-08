@@ -333,9 +333,35 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     }
   };
 
-  // Pre-process all message content with URL rewriting
+  // Pre-process all message content with URL rewriting + sanitization.
+  // Cached by message id + content (so edits via update_message bust the
+  // entry). Without this, every new event re-runs the full regex pass +
+  // DOMPurify over every message in the thread — a 200-message view
+  // would re-process all 200 on each incoming message.
+  const renderCache = useRef<Map<number, { content: string; html: string }>>(new Map());
+  // Bust the cache if processContent identity changes (e.g. login/logout
+  // changes resolveUrl, which would invalidate every cached href/src).
+  useEffect(() => { renderCache.current.clear(); }, [processContent]);
+
   const processedMessages = useMemo(
-    () => messages.map((m) => ({ ...m, _html: processContent(m.content) })),
+    () => {
+      const cache = renderCache.current;
+      const seenIds = new Set<number>();
+      const out = messages.map((m) => {
+        seenIds.add(m.id);
+        const hit = cache.get(m.id);
+        if (hit && hit.content === m.content) return { ...m, _html: hit.html };
+        const html = processContent(m.content);
+        cache.set(m.id, { content: m.content, html });
+        return { ...m, _html: html };
+      });
+      // Drop entries for messages that left the view (e.g. narrow change)
+      // so the cache doesn't grow unboundedly across long sessions.
+      if (cache.size > seenIds.size + 100) {
+        for (const id of cache.keys()) if (!seenIds.has(id)) cache.delete(id);
+      }
+      return out;
+    },
     [messages, processContent]
   );
 

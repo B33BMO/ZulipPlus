@@ -904,23 +904,29 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [api, users, subscriptions]
   );
 
+  // Read the oldest-message id from a ref instead of putting `messages` in
+  // the deps. Otherwise this callback's identity changes on every event,
+  // which detaches/reattaches the scroll listener in MessageList on every
+  // single message arrival.
+  const messagesRef = useRef<ZulipMessage[]>(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
   const loadOlderMessages = useCallback(
     async () => {
-      if (!api || loadingOlder || !hasMoreMessages || messages.length === 0) return;
+      const cur = messagesRef.current;
+      if (!api || loadingOlder || !hasMoreMessages || cur.length === 0) return;
       const myToken = loadNavTokenRef.current;
       const narrowAtRequest = currentNarrowRef.current;
       setLoadingOlder(true);
       try {
-        const oldestId = messages[0].id;
+        const oldestId = cur[0].id;
         const res = await api.getMessages({
           narrow: narrowAtRequest,
           anchor: oldestId,
           num_before: 50,
           num_after: 0,
         });
-        // Bail if user navigated to a different narrow mid-flight.
         if (loadNavTokenRef.current !== myToken) return;
-        // Remove the anchor message (it's already in our list)
         const olderMessages = res.messages.filter((m) => m.id < oldestId);
         if (olderMessages.length > 0) {
           setMessages((prev) => [...olderMessages, ...prev]);
@@ -930,7 +936,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         if (loadNavTokenRef.current === myToken) setLoadingOlder(false);
       }
     },
-    [api, loadingOlder, hasMoreMessages, messages]
+    [api, loadingOlder, hasMoreMessages]
   );
 
   const sendMessage = useCallback(
@@ -1096,11 +1102,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   // Fetch a URL with auth and return a blob URL (for images in messages).
-  // Uses the LRU declared up-front (so logout can revoke entries).
+  // Real LRU: re-inserting on hit keeps recently-accessed entries young.
+  // Map iteration order is insertion order, so deleting + re-setting moves
+  // the entry to the tail and `keys().next().value` gives us the head.
   const fetchAuthenticatedUrl = useCallback(
     async (url: string): Promise<string> => {
       const cached = blobCache.current.get(url);
-      if (cached) return cached;
+      if (cached) {
+        blobCache.current.delete(url);
+        blobCache.current.set(url, cached);
+        return cached;
+      }
 
       try {
         const resolved = resolveUrl(url);
@@ -1111,7 +1123,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
 
-        // Evict oldest entries if cache is full
+        // Evict the LRU head if the cache is full.
         if (blobCache.current.size >= BLOB_CACHE_MAX) {
           const firstKey = blobCache.current.keys().next().value;
           if (firstKey) {
