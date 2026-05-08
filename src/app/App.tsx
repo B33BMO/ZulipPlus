@@ -9,6 +9,7 @@ import { SearchBar } from './components/SearchBar';
 import { SignIn } from './components/SignIn';
 import { EditStatusModal } from './components/EditStatusModal';
 import { SettingsModal } from './components/SettingsModal';
+import { UpdateBanner } from './components/UpdateBanner';
 import { ZulipProvider, useZulip, dmKey } from './context/ZulipContext';
 
 function AppContent() {
@@ -212,7 +213,14 @@ function AppContent() {
 
   // Show sign-in page if not authenticated
   if (!currentUser) {
-    return <SignIn />;
+    return (
+      <div className="size-full flex flex-col bg-surface-primary">
+        <UpdateBanner />
+        <div className="flex-1 min-h-0">
+          <SignIn />
+        </div>
+      </div>
+    );
   }
 
   // Names of the OTHER participants in a DM/huddle (in user_id order).
@@ -323,9 +331,9 @@ function AppContent() {
   };
 
   return (
-    <div
-      className="size-full flex bg-surface-primary"
-    >
+    <div className="size-full flex flex-col bg-surface-primary">
+      <UpdateBanner />
+      <div className="flex-1 flex min-h-0">
       {/* Sidebar */}
       <Sidebar
         isCollapsed={isSidebarCollapsed}
@@ -433,6 +441,7 @@ function AppContent() {
         richColors
         closeButton
       />
+      </div>
     </div>
   );
 }
