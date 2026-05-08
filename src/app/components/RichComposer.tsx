@@ -155,22 +155,6 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     },
   }), [editor]);
 
-  // Update placeholder when prop changes — destroy and re-init the placeholder plugin
-  useEffect(() => {
-    if (!editor || editor.isDestroyed) return;
-    // Update the placeholder option on the extension
-    editor.extensionManager.extensions.forEach((ext) => {
-      if (ext.name === 'placeholder') {
-        (ext.options as any).placeholder = placeholder;
-      }
-    });
-    // Re-register plugins to pick up the new placeholder value
-    const plugins = editor.extensionManager.plugins;
-    editor.view.updateState(
-      editor.state.reconfigure({ plugins })
-    );
-  }, [editor, placeholder]);
-
   // Upload a file and insert into editor
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -680,12 +664,19 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                 <TooltipTrigger asChild>
                   <Button
                     onClick={() => {
-                      // Insert spoiler as markdown (Zulip-specific)
-                      const markdown = editor.storage.markdown.getMarkdown();
-                      editor.commands.clearContent();
-                      editor.commands.insertContent(
-                        markdown + '\n```spoiler Header\n\n```'
-                      );
+                      // Insert a Zulip spoiler block as a code block with the
+                      // "spoiler Header" infostring. tiptap-markdown serializes
+                      // this back to ```spoiler Header on send. Critically:
+                      // does NOT round-trip through clearContent/insertContent
+                      // (which strips formatting and inserts literal backticks).
+                      editor
+                        .chain()
+                        .focus()
+                        .insertContent({
+                          type: 'codeBlock',
+                          attrs: { language: 'spoiler Header' },
+                        })
+                        .run();
                     }}
                     variant="ghost"
                     size="icon"
