@@ -167,6 +167,15 @@ function createWindow() {
   });
 }
 
+// Open a URL in the user's default browser. The preload can't do this
+// itself because the BrowserWindow runs `sandbox: true`, which disables
+// the `shell` module in preload scripts — calls there would silently
+// no-op. Routing through IPC lets the main process honour the call.
+ipcMain.handle('open-external', (_evt, url: string) => {
+  if (typeof url !== 'string') return;
+  safeOpenExternal(url);
+});
+
 // Renderer announces the configured Zulip server origin so we can scope the
 // Origin/CORS header rewrites above to that one origin. Idempotent; called
 // post-login and on auto-login from cached creds.
