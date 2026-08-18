@@ -138,14 +138,57 @@
 }
 
 .zulip-content .spoiler-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   cursor: pointer;
   font-weight: 500;
+  user-select: none;
 }
 
+.zulip-content .spoiler-header:hover {
+  background-color: var(--surface-hover);
+}
+
+.zulip-content .spoiler-header:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+/* Zulip's header markup wraps its text in a <p>; drop the block margins so
+   the disclosure arrow sits inline with it. */
+.zulip-content .spoiler-header > p {
+  margin: 0;
+}
+
+/* Disclosure arrow, rotated when open. Drawn with borders so there's no
+   dependency on an icon font. */
+.zulip-content .spoiler-header::before {
+  content: '';
+  flex-shrink: 0;
+  width: 0;
+  height: 0;
+  border-left: 0.4em solid currentColor;
+  border-top: 0.28em solid transparent;
+  border-bottom: 0.28em solid transparent;
+  transition: transform 0.15s ease;
+}
+
+.zulip-content .spoiler-block.spoiler-open > .spoiler-header::before {
+  transform: rotate(90deg);
+}
+
+/* Collapsed by default — the whole point of a spoiler. The block is inert
+   HTML from the server, so MessageList toggles `.spoiler-open` on click. */
 .zulip-content .spoiler-content {
+  display: none;
   padding: 0.5rem 0.75rem;
   border-top: 1px solid var(--surface-hover);
+}
+
+.zulip-content .spoiler-block.spoiler-open > .spoiler-content {
+  display: block;
 }
 
 .zulip-content .codehilite {

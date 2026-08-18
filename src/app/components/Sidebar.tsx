@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronRight, ChevronDown, Hash, Menu, Users, Lock, Volume2, VolumeX } from 'lucide-react';
+import { ChevronRight, ChevronDown, Hash, Menu, Users, Lock, Volume2, VolumeX, Search, X } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -43,6 +43,15 @@ export function Sidebar({
   } = useZulip();
   const [expandedStreams, setExpandedStreams] = useState<Set<number>>(new Set());
   const [showAllDMs, setShowAllDMs] = useState(false);
+  // Per-stream topic filter text, keyed by stream id.
+  const [topicFilters, setTopicFilters] = useState<Record<number, string>>({});
+
+  // Below this many topics the list is scannable by eye and a search box is
+  // just clutter; above it, finding a topic by scrolling is miserable.
+  const TOPIC_FILTER_THRESHOLD = 8;
+
+  const setTopicFilter = (streamId: number, value: string) =>
+    setTopicFilters((prev) => ({ ...prev, [streamId]: value }));
 
   const toggleStream = async (streamId: number) => {
     const next = new Set(expandedStreams);
@@ -376,9 +385,54 @@ export function Sidebar({
                         </button>
                       </div>
 
-                      {expandedStreams.has(sub.stream_id) && (
+                      {expandedStreams.has(sub.stream_id) && (() => {
+                        const allTopics = topics[sub.stream_id] || [];
+                        const filter = (topicFilters[sub.stream_id] || '').trim().toLowerCase();
+                        const visibleTopics = filter
+                          ? allTopics.filter((t) => t.name.toLowerCase().includes(filter))
+                          : allTopics;
+                        const showFilter = allTopics.length > TOPIC_FILTER_THRESHOLD;
+                        return (
                         <div className="ml-6 space-y-0.5 mt-0.5">
-                          {(topics[sub.stream_id] || []).map((topic) => {
+                          {showFilter && (
+                            <div className="relative mb-1">
+                              <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-text-muted pointer-events-none" />
+                              <input
+                                type="text"
+                                value={topicFilters[sub.stream_id] || ''}
+                                onChange={(e) => setTopicFilter(sub.stream_id, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setTopicFilter(sub.stream_id, '');
+                                  }
+                                }}
+                                placeholder={`Filter ${allTopics.length} topics...`}
+                                aria-label={`Filter topics in ${sub.name}`}
+                                className="w-full h-7 pl-7 pr-6 rounded bg-surface-tertiary border border-surface-tertiary text-text-primary placeholder:text-text-muted text-xs outline-none focus:border-brand"
+                              />
+                              {(topicFilters[sub.stream_id] || '') && (
+                                <button
+                                  onClick={() => setTopicFilter(sub.stream_id, '')}
+                                  aria-label="Clear topic filter"
+                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                                >
+                                  <X className="size-3" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {showFilter && filter && (
+                            <div className="px-2 py-0.5 text-[10px] text-text-muted">
+                              {visibleTopics.length} of {allTopics.length}
+                            </div>
+                          )}
+                          {visibleTopics.length === 0 && filter && (
+                            <div className="px-2 py-1.5 text-xs text-text-muted italic">
+                              No topics match &ldquo;{topicFilters[sub.stream_id]}&rdquo;
+                            </div>
+                          )}
+                          {visibleTopics.map((topic) => {
                             const topicUnread =
                               unreadCounts.streams[
                                 `${sub.stream_id}:${topic.name}`
@@ -408,7 +462,8 @@ export function Sidebar({
                             );
                           })}
                         </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   );
                 })}

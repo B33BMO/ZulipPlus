@@ -86,6 +86,28 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     }
   }, [deleteTargetId, deleteMessage]);
 
+  // Flip a spoiler block open/closed, keeping the ARIA state in step with the
+  // class the stylesheet keys off.
+  const toggleSpoiler = useCallback((header: Element) => {
+    const block = header.closest('.spoiler-block');
+    if (!block) return;
+    const open = block.classList.toggle('spoiler-open');
+    header.setAttribute('aria-expanded', String(open));
+    const content = block.querySelector('.spoiler-content');
+    // Zulip ships aria-hidden="true" on the content; keep it truthful.
+    if (content) content.setAttribute('aria-hidden', String(!open));
+  }, []);
+
+  // Enter/Space on a focused spoiler header, matching native <button>/<details>
+  // behaviour. Space is preventDefault'd so it doesn't scroll the thread.
+  const handleContentKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const header = (e.target as HTMLElement).closest?.('.spoiler-header');
+    if (!header) return;
+    e.preventDefault();
+    toggleSpoiler(header);
+  }, [toggleSpoiler]);
+
   // Handle clicks on links (open external) and images (open viewer).
   // Image takes priority over a wrapping anchor: Zulip renders inline
   // images as <a href="/user_uploads/..."><img src="/user_uploads/..."></a>,
@@ -95,6 +117,15 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
   const handleContentClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
     if (!target.closest('.zulip-content')) return;
+
+    // Checked before images/links: a spoiler header can contain both, and
+    // clicking it should always mean "toggle", not "open that thing".
+    const spoilerHeader = target.closest('.spoiler-header');
+    if (spoilerHeader) {
+      e.preventDefault();
+      toggleSpoiler(spoilerHeader);
+      return;
+    }
 
     const img = target.closest('img');
     if (img) {
@@ -130,7 +161,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       // Other schemes (mailto:, #narrow/...) are intentionally swallowed
       // for now — we can wire internal narrow navigation as a follow-up.
     }
-  }, [fetchAuthenticatedUrl]);
+  }, [fetchAuthenticatedUrl, toggleSpoiler]);
 
   // Close reaction picker on click outside
   useEffect(() => {
@@ -301,13 +332,24 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
           return `${tagOpen}${beforeAttrs} href="${resolved}"${after}`;
         }
       );
+      // Step 2b: Zulip ships spoilers as an inert
+      // `<div class="spoiler-block">` — the collapse/expand behaviour lives
+      // in its own client's JavaScript, which we don't have. Without this the
+      // block renders permanently open, which defeats the entire purpose of a
+      // spoiler. Tag the header as a disclosure control so the click/keyboard
+      // handlers below can drive it, and so screen readers announce it.
+      out = out.replace(
+        /<div\b(?![^>]*\brole=)([^>]*\bclass="[^"]*\bspoiler-header\b[^"]*"[^>]*)>/gi,
+        '<div role="button" tabindex="0" aria-expanded="false"$1>'
+      );
+
       // Step 3: defence-in-depth sanitisation. Zulip's server-rendered HTML
       // is normally trusted, but a compromised or buggy server is the kind
       // of thing this client can't otherwise defend against — and a renderer
       // XSS would steal the API key out of localStorage. ALLOW data-auth-src
       // on <img> so our authenticated-image loader still works.
       return DOMPurify.sanitize(out, {
-        ADD_ATTR: ['data-auth-src', 'target'],
+        ADD_ATTR: ['data-auth-src', 'target', 'tabindex'],
         FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form'],
       });
     },
@@ -495,6 +537,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       ref={scrollRef}
       onScroll={handleScroll}
       onClick={handleContentClick}
+      onKeyDown={handleContentKeyDown}
       className="flex-1 min-h-0 overflow-y-auto px-4"
     >
       {/* Loading older messages indicator */}
