@@ -6,6 +6,7 @@ import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
 import Image from '@tiptap/extension-image';
 import { Markdown } from 'tiptap-markdown';
+import { PlainText, ZulipQuote, insertQuoteNode, type ZulipQuoteAttrs } from './editor/extensions';
 import { useZulip } from '../context/ZulipContext';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import {
@@ -34,8 +35,8 @@ import { EmojiPicker } from './EmojiPicker';
 import { GifPicker } from './GifPicker';
 
 export interface RichComposerHandle {
-  insertContent: (markdown: string) => void;
-  insertRawText: (text: string) => void;
+  /** Insert a pre-built Zulip markdown block that must survive verbatim. */
+  insertQuote: (attrs: ZulipQuoteAttrs) => void;
   clearContent: () => void;
 }
 
@@ -60,6 +61,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   const [uploading, setUploading] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
+  const [showSpoilerInput, setShowSpoilerInput] = useState(false);
+  const [spoilerHeader, setSpoilerHeader] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -70,6 +73,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   const emojiRef = useRef<HTMLDivElement>(null);
   const gifBtnRef = useRef<HTMLDivElement>(null);
   const gifRef = useRef<HTMLDivElement>(null);
+  const spoilerBtnRef = useRef<HTMLDivElement>(null);
+  const spoilerRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const fileUploadRef = useRef<((file: File) => Promise<void>) | null>(null);
 
@@ -90,7 +95,12 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         codeBlock: {
           HTMLAttributes: { class: 'zulip-code-block' },
         },
+        // Replaced by PlainText below, which drops tiptap-markdown's HTML
+        // entity escaping. Two text nodes in one schema is an error.
+        text: false,
       }),
+      PlainText,
+      ZulipQuote,
       Placeholder.configure({ placeholder }),
       Link.configure({
         openOnClick: false,
@@ -113,6 +123,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
           'prose prose-invert prose-sm max-w-none px-3 py-2 min-h-[44px] max-h-[200px] overflow-y-auto outline-none text-gray-200 text-sm',
       },
       handleKeyDown: (_view, event) => {
+        // `isComposing` (and the legacy keyCode 229) mean an IME is still
+        // resolving a candidate — Enter there commits the candidate, it does
+        // not mean "send". Without this guard, typing in Japanese/Chinese/
+        // Korean fires off half-finished messages.
+        if (event.isComposing || event.keyCode === 229) return false;
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
           handleSendRef.current();
@@ -139,15 +154,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     content: '',
   });
 
-  // Expose insertContent, insertRawText, and clearContent to parent via ref
+  // Expose the imperative API used by App.
   useImperativeHandle(ref, () => ({
-    insertContent: (markdown: string) => {
+    insertQuote: (attrs: ZulipQuoteAttrs) => {
       if (!editor) return;
-      editor.chain().focus().insertContent(markdown).run();
-    },
-    insertRawText: (text: string) => {
-      if (!editor) return;
-      editor.chain().focus().insertContent({ type: 'text', text }).run();
+      insertQuoteNode(editor, attrs);
     },
     clearContent: () => {
       if (!editor) return;
@@ -226,16 +237,27 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       ) {
         setShowGifPicker(false);
       }
+      if (
+        showSpoilerInput &&
+        spoilerRef.current && !spoilerRef.current.contains(target) &&
+        spoilerBtnRef.current && !spoilerBtnRef.current.contains(target)
+      ) {
+        setShowSpoilerInput(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showEmojiPicker, showGifPicker]);
+  }, [showEmojiPicker, showGifPicker, showSpoilerInput]);
 
   const handleSend = useCallback(async () => {
     if (!editor || sending) return;
 
     // Get markdown content from editor
-    const markdown = editor.storage.markdown.getMarkdown();
+    // tiptap-markdown augments `editor.storage` at runtime but ships no
+    // type augmentation for it.
+    const markdown = (
+      editor.storage as unknown as { markdown: { getMarkdown: () => string } }
+    ).markdown.getMarkdown();
     if (!markdown.trim()) return;
 
     setSending(true);
@@ -271,9 +293,15 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     const onUpdate = () => {
       const { from } = editor.state.selection;
       const textBefore = editor.state.doc.textBetween(Math.max(0, from - 50), from, '\n');
-      const match = textBefore.match(/@([A-Za-z ]*)$/);
+      // Trigger only at a word boundary (so `user@example.com` doesn't open
+      // the popup), allow any letter/mark plus the punctuation real names
+      // contain, and cap at two words so a stray "@" doesn't keep the popup
+      // latched open for the rest of the sentence.
+      const match = textBefore.match(/(?:^|[\s(])@([\p{L}\p{M}\d._'-]*(?:[ ][\p{L}\p{M}\d._'-]+)?)$/u);
       if (match) {
-        mentionStartRef.current = from - match[0].length;
+        // match[0] can include the boundary character before '@' — anchor the
+        // replacement range at the '@' so we don't eat the preceding space.
+        mentionStartRef.current = from - match[0].length + match[0].indexOf('@');
         setMentionQuery(match[1]);
         setMentionIndex(0);
         try {
@@ -346,24 +374,31 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   }, [editor, sendTyping]);
 
   // Insert a mention and close the popup
-  const insertMention = useCallback((userName: string) => {
+  const insertMention = useCallback((userName: string, userId?: number) => {
     if (!editor || mentionStartRef.current === null) return;
     const from = mentionStartRef.current;
     const to = editor.state.selection.from;
-    // Delete the @query text and insert the Zulip mention syntax
+    // Zulip resolves @**Name** by display name, which is ambiguous when two
+    // people share one. Fall back to the explicit @**Name|id** form only when
+    // needed, matching what Zulip's own composer does.
+    const ambiguous =
+      userId !== undefined &&
+      users.filter((u) => u.is_active && u.full_name === userName).length > 1;
+    const mention = ambiguous ? `@**${userName}|${userId}** ` : `@**${userName}** `;
     editor.chain().focus()
       .deleteRange({ from, to })
-      .insertContent(`@**${userName}** `)
+      .insertContent(mention)
       .run();
     setMentionQuery(null);
     setMentionPos(null);
     mentionStartRef.current = null;
-  }, [editor]);
+  }, [editor, users]);
 
   // Handle keyboard navigation in mention popup
   useEffect(() => {
     if (mentionQuery === null || !editor) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setMentionIndex((i) => Math.min(i + 1, mentionUsers.length - 1));
@@ -374,7 +409,10 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         if (mentionUsers.length > 0) {
           e.preventDefault();
           e.stopPropagation();
-          insertMention(mentionUsers[mentionIndex].full_name);
+          insertMention(
+            mentionUsers[mentionIndex].full_name,
+            mentionUsers[mentionIndex].user_id
+          );
         }
       } else if (e.key === 'Escape') {
         setMentionQuery(null);
@@ -388,10 +426,13 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   }, [mentionQuery, mentionUsers, mentionIndex, insertMention, editor]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await handleFileUploadInternal(file);
+    const files = Array.from(e.target.files ?? []);
+    // Reset the input up-front so picking the same file twice in a row still
+    // fires a change event.
     if (fileInputRef.current) fileInputRef.current.value = '';
+    for (const file of files) {
+      await handleFileUploadInternal(file);
+    }
   };
 
   const handleEmojiSelect = (emoji: string) => {
@@ -399,6 +440,27 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     editor.chain().focus().insertContent(emoji).run();
     setShowEmojiPicker(false);
   };
+
+  // Zulip's spoiler syntax carries its header in the fence info string:
+  //   ```spoiler Click to reveal
+  // Bare ```spoiler falls back to the server's default "Spoiler" label.
+  // The header lives in the code block's `language` attribute, which isn't
+  // editable once inserted — hence asking for it up front rather than
+  // dropping in a literal "Header" the user then can't change.
+  const insertSpoiler = useCallback((header: string) => {
+    if (!editor) return;
+    const label = header.trim();
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: 'codeBlock',
+        attrs: { language: label ? `spoiler ${label}` : 'spoiler' },
+      })
+      .run();
+    setShowSpoilerInput(false);
+    setSpoilerHeader('');
+  }, [editor]);
 
   const handleGifSelect = (gifUrl: string, altText: string) => {
     if (!editor) return;
@@ -451,7 +513,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                   }`}
                   onMouseDown={(e) => {
                     e.preventDefault(); // Prevent editor blur
-                    insertMention(user.full_name);
+                    insertMention(user.full_name, user.user_id);
                   }}
                   onMouseEnter={() => setMentionIndex(i)}
                 >
@@ -660,33 +722,70 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                 <TooltipContent><p>Code</p></TooltipContent>
               </Tooltip>
 
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    onClick={() => {
-                      // Insert a Zulip spoiler block as a code block with the
-                      // "spoiler Header" infostring. tiptap-markdown serializes
-                      // this back to ```spoiler Header on send. Critically:
-                      // does NOT round-trip through clearContent/insertContent
-                      // (which strips formatting and inserts literal backticks).
-                      editor
-                        .chain()
-                        .focus()
-                        .insertContent({
-                          type: 'codeBlock',
-                          attrs: { language: 'spoiler Header' },
-                        })
-                        .run();
-                    }}
-                    variant="ghost"
-                    size="icon"
-                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+              <div ref={spoilerBtnRef} className="relative">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      onClick={() => {
+                        setShowSpoilerInput((v) => !v);
+                        setShowEmojiPicker(false);
+                        setShowGifPicker(false);
+                      }}
+                      variant="ghost"
+                      size="icon"
+                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                        showSpoilerInput ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
+                      }`}
+                    >
+                      <Eye className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent><p>Spoiler</p></TooltipContent>
+                </Tooltip>
+
+                {showSpoilerInput && (
+                  <div
+                    ref={spoilerRef}
+                    className="absolute bottom-full left-0 mb-2 z-[100] w-64 rounded-lg border border-surface-tertiary bg-surface-secondary p-2 shadow-xl"
                   >
-                    <Eye className="size-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent><p>Spoiler</p></TooltipContent>
-              </Tooltip>
+                    <label className="mb-1 block text-[11px] font-medium text-text-secondary">
+                      Spoiler heading
+                    </label>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={spoilerHeader}
+                      onChange={(e) => setSpoilerHeader(e.target.value)}
+                      onKeyDown={(e) => {
+                        // Stop these reaching the editor's Enter-to-send handler.
+                        e.stopPropagation();
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          insertSpoiler(spoilerHeader);
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setShowSpoilerInput(false);
+                          setSpoilerHeader('');
+                        }
+                      }}
+                      placeholder="Spoiler"
+                      className="w-full rounded border border-surface-tertiary bg-surface-tertiary px-2 py-1 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-brand"
+                    />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-text-muted">
+                        Leave blank for &ldquo;Spoiler&rdquo;
+                      </span>
+                      <Button
+                        size="sm"
+                        className="h-6 bg-brand px-2 text-xs hover:bg-brand-hover"
+                        onClick={() => insertSpoiler(spoilerHeader)}
+                      >
+                        Insert
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </TooltipProvider>
           </div>
 
@@ -709,6 +808,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         className="hidden"
         onChange={handleFileSelect}
       />

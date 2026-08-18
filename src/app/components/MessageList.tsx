@@ -3,25 +3,29 @@ import { createPortal } from 'react-dom';
 import DOMPurify from 'dompurify';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { useZulip } from '../context/ZulipContext';
+import { platform } from '../platform';
 import type { ZulipMessage } from '../api/types';
 import { format } from 'date-fns';
-import { Loader2, Pencil, Quote, SmilePlus, Trash2 } from 'lucide-react';
+import { ArrowDown, Loader2, Pencil, Quote, SmilePlus, Trash2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { Button } from './ui/button';
 import { EmojiPicker } from './EmojiPicker';
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 
 interface MessageListProps {
-  onQuote?: (senderName: string, content: string) => void;
+  onQuote?: (message: ZulipMessage) => void;
 }
 
 export function MessageList({ onQuote }: MessageListProps = {}) {
   const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, editMessage, deleteMessage, getMessageRaw, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji } = useZulip();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const hasScrolled = useRef(false);
   const prevScrollHeight = useRef(0);
   const isNearBottom = useRef(true);
+  // Newest message id we've already auto-scrolled for. `null` means the list
+  // is empty / we're painting a freshly-opened conversation.
+  const lastMessageIdRef = useRef<number | null>(null);
+  const [unreadBelow, setUnreadBelow] = useState(0);
   const [reactingMessageId, setReactingMessageId] = useState<number | null>(null);
   const [pickerPos, setPickerPos] = useState<{ right: number; bottom: number } | null>(null);
   const reactPickerRef = useRef<HTMLDivElement>(null);
@@ -82,6 +86,28 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     }
   }, [deleteTargetId, deleteMessage]);
 
+  // Flip a spoiler block open/closed, keeping the ARIA state in step with the
+  // class the stylesheet keys off.
+  const toggleSpoiler = useCallback((header: Element) => {
+    const block = header.closest('.spoiler-block');
+    if (!block) return;
+    const open = block.classList.toggle('spoiler-open');
+    header.setAttribute('aria-expanded', String(open));
+    const content = block.querySelector('.spoiler-content');
+    // Zulip ships aria-hidden="true" on the content; keep it truthful.
+    if (content) content.setAttribute('aria-hidden', String(!open));
+  }, []);
+
+  // Enter/Space on a focused spoiler header, matching native <button>/<details>
+  // behaviour. Space is preventDefault'd so it doesn't scroll the thread.
+  const handleContentKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const header = (e.target as HTMLElement).closest?.('.spoiler-header');
+    if (!header) return;
+    e.preventDefault();
+    toggleSpoiler(header);
+  }, [toggleSpoiler]);
+
   // Handle clicks on links (open external) and images (open viewer).
   // Image takes priority over a wrapping anchor: Zulip renders inline
   // images as <a href="/user_uploads/..."><img src="/user_uploads/..."></a>,
@@ -91,6 +117,15 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
   const handleContentClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
     if (!target.closest('.zulip-content')) return;
+
+    // Checked before images/links: a spoiler header can contain both, and
+    // clicking it should always mean "toggle", not "open that thing".
+    const spoilerHeader = target.closest('.spoiler-header');
+    if (spoilerHeader) {
+      e.preventDefault();
+      toggleSpoiler(spoilerHeader);
+      return;
+    }
 
     const img = target.closest('img');
     if (img) {
@@ -121,17 +156,12 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       e.preventDefault();
       if (!href) return;
       if (href.startsWith('http://') || href.startsWith('https://')) {
-        const electronAPI = (window as { electronAPI?: { openExternal?: (url: string) => void } }).electronAPI;
-        if (electronAPI?.openExternal) {
-          electronAPI.openExternal(href);
-        } else {
-          window.open(href, '_blank', 'noopener,noreferrer');
-        }
+        platform.openExternal(href).catch(() => {});
       }
       // Other schemes (mailto:, #narrow/...) are intentionally swallowed
       // for now — we can wire internal narrow navigation as a follow-up.
     }
-  }, [fetchAuthenticatedUrl]);
+  }, [fetchAuthenticatedUrl, toggleSpoiler]);
 
   // Close reaction picker on click outside
   useEffect(() => {
@@ -157,24 +187,41 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     return el.scrollHeight - el.scrollTop - el.clientHeight < 150;
   }, []);
 
-  // Scroll to bottom when messages change (only for new messages at the end)
+  // Auto-scroll policy. Previously this jumped to the bottom on EVERY change
+  // to `messages`, so a message arriving while you were reading scrollback
+  // ripped you back down to the newest one. Now we only follow along when the
+  // reader is already parked at the bottom, when they sent the message
+  // themselves, or on the first paint of a conversation.
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || messages.length === 0) return;
+    if (!el) return;
+    if (messages.length === 0) {
+      lastMessageIdRef.current = null;
+      setUnreadBelow(0);
+      return;
+    }
 
-    // If we just loaded older messages, restore scroll position
+    // Restoring position after prepending older messages.
     if (prevScrollHeight.current > 0) {
-      const newScrollHeight = el.scrollHeight;
-      el.scrollTop = newScrollHeight - prevScrollHeight.current;
+      el.scrollTop = el.scrollHeight - prevScrollHeight.current;
       prevScrollHeight.current = 0;
       return;
     }
 
-    // Otherwise scroll to bottom
-    isNearBottom.current = true;
-    scrollToBottom(hasScrolled.current);
-    hasScrolled.current = true;
-  }, [messages, scrollToBottom]);
+    const newest = messages[messages.length - 1];
+    const isFirstPaint = lastMessageIdRef.current === null;
+    const isNewArrival = !isFirstPaint && newest.id !== lastMessageIdRef.current;
+    const sentByMe = !!currentUser && newest.sender_id === currentUser.user_id;
+    lastMessageIdRef.current = newest.id;
+
+    if (isFirstPaint || sentByMe || (isNewArrival && isNearBottom.current)) {
+      scrollToBottom(!isFirstPaint);
+      isNearBottom.current = true;
+      setUnreadBelow(0);
+    } else if (isNewArrival) {
+      setUnreadBelow((n) => n + 1);
+    }
+  }, [messages, scrollToBottom, currentUser]);
 
   // Lazy loading: detect scroll to top + track near-bottom
   const handleScroll = useCallback(() => {
@@ -182,23 +229,51 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     if (!el) return;
 
     isNearBottom.current = checkNearBottom();
+    if (isNearBottom.current) setUnreadBelow(0);
 
     if (!hasMoreMessages || loadingOlder) return;
     if (el.scrollTop < 100) {
       prevScrollHeight.current = el.scrollHeight;
-      loadOlderMessages();
+      loadOlderMessages().then((added) => {
+        // Nothing was prepended — drop the anchor so the next update isn't
+        // interpreted as "restore the pre-prepend scroll position".
+        if (!added) prevScrollHeight.current = 0;
+      });
     }
   }, [hasMoreMessages, loadingOlder, loadOlderMessages, checkNearBottom]);
 
-  // Mark messages as read
+  // Mark messages as read — but only while the app actually has focus.
+  // Marking on arrival regardless of focus meant messages that landed while
+  // you were in another app were already "read" when you came back, so the
+  // unread badge never appeared. Ids we've submitted are remembered so a
+  // slow round-trip can't cause the same batch to be POSTed repeatedly.
+  const submittedReads = useRef<Set<number>>(new Set());
   useEffect(() => {
-    const unread = messages
-      .filter((m) => !(m.flags ?? []).includes('read'))
-      .map((m) => m.id);
-    if (unread.length > 0) {
-      markMessagesAsRead(unread);
-    }
+    const flush = () => {
+      if (typeof document !== 'undefined' && !document.hasFocus()) return;
+      const unread = messages
+        .filter((m) => !(m.flags ?? []).includes('read') && !submittedReads.current.has(m.id))
+        .map((m) => m.id);
+      if (unread.length === 0) return;
+      for (const id of unread) submittedReads.current.add(id);
+      markMessagesAsRead(unread).catch(() => {
+        for (const id of unread) submittedReads.current.delete(id);
+      });
+    };
+    flush();
+    window.addEventListener('focus', flush);
+    return () => window.removeEventListener('focus', flush);
   }, [messages, markMessagesAsRead]);
+
+  // Keep the submitted-ids set from growing without bound across a long
+  // session: anything no longer in view can't be re-submitted anyway.
+  useEffect(() => {
+    if (submittedReads.current.size <= 500) return;
+    const visible = new Set(messages.map((m) => m.id));
+    for (const id of submittedReads.current) {
+      if (!visible.has(id)) submittedReads.current.delete(id);
+    }
+  }, [messages]);
 
   // Rewrite relative URLs in HTML content to go through proxy.
   // For <img>, swap src for a placeholder and stash the real URL in data-auth-src
@@ -257,13 +332,24 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
           return `${tagOpen}${beforeAttrs} href="${resolved}"${after}`;
         }
       );
+      // Step 2b: Zulip ships spoilers as an inert
+      // `<div class="spoiler-block">` — the collapse/expand behaviour lives
+      // in its own client's JavaScript, which we don't have. Without this the
+      // block renders permanently open, which defeats the entire purpose of a
+      // spoiler. Tag the header as a disclosure control so the click/keyboard
+      // handlers below can drive it, and so screen readers announce it.
+      out = out.replace(
+        /<div\b(?![^>]*\brole=)([^>]*\bclass="[^"]*\bspoiler-header\b[^"]*"[^>]*)>/gi,
+        '<div role="button" tabindex="0" aria-expanded="false"$1>'
+      );
+
       // Step 3: defence-in-depth sanitisation. Zulip's server-rendered HTML
       // is normally trusted, but a compromised or buggy server is the kind
       // of thing this client can't otherwise defend against — and a renderer
       // XSS would steal the API key out of localStorage. ALLOW data-auth-src
       // on <img> so our authenticated-image loader still works.
       return DOMPurify.sanitize(out, {
-        ADD_ATTR: ['data-auth-src', 'target'],
+        ADD_ATTR: ['data-auth-src', 'target', 'tabindex'],
         FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form'],
       });
     },
@@ -321,14 +407,10 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     return Object.values(groups);
   };
 
-  // Build Zulip-style quote from a message
+  // Hand the whole message up; the quote block is built from its raw markdown
+  // (fetched on demand), not from the rendered HTML we happen to be showing.
   const handleQuote = useCallback((message: ZulipMessage) => {
-    if (!onQuote) return;
-    // Extract text from HTML content
-    const div = document.createElement('div');
-    div.innerHTML = message.content;
-    const text = div.textContent || div.innerText || '';
-    onQuote(message.sender_full_name, text.trim());
+    onQuote?.(message);
   }, [onQuote]);
 
   // Render emoji: unicode emoji from codepoint, or custom emoji image
@@ -446,10 +528,12 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
 
   return (
     <>
+    <div className="relative flex-1 min-h-0 flex flex-col">
     <div
       ref={scrollRef}
       onScroll={handleScroll}
       onClick={handleContentClick}
+      onKeyDown={handleContentKeyDown}
       className="flex-1 min-h-0 overflow-y-auto px-4"
     >
       {/* Loading older messages indicator */}
@@ -687,6 +771,19 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
         })}
         <div ref={bottomRef} />
       </div>
+    </div>
+
+    {/* Jump to latest — shown when messages arrived while reading scrollback,
+        so following the conversation never requires hunting for the bottom. */}
+    {unreadBelow > 0 && (
+      <button
+        onClick={() => { scrollToBottom(true); isNearBottom.current = true; setUnreadBelow(0); }}
+        className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 rounded-full bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-brand-hover"
+      >
+        <ArrowDown className="size-3.5" />
+        {unreadBelow} new message{unreadBelow === 1 ? '' : 's'}
+      </button>
+    )}
     </div>
 
     {/* Image Viewer Modal */}

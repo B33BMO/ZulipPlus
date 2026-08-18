@@ -25,7 +25,7 @@ export function GifPicker({ onSelect }: GifPickerProps) {
   const [gifs, setGifs] = useState<GiphyGif[]>([]);
   const [loading, setLoading] = useState(false);
   const [trending, setTrending] = useState<GiphyGif[]>([]);
-  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Load trending on mount
   useEffect(() => {
