@@ -335,3 +335,39 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ── Composer: quoted-message chip ─────────────────────
+   The zulipQuote node is an opaque atom holding pre-built markdown (see
+   components/editor/extensions.ts), so it renders as a summary card rather
+   than editable text. Styled to read as "attached to this message" without
+   looking like something you can type into. */
+.zulip-quote-chip {
+  border-left: 3px solid var(--brand);
+  background-color: var(--surface-tertiary);
+  border-radius: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  margin: 0.25rem 0;
+  cursor: default;
+  user-select: none;
+}
+
+.ProseMirror-selectednode.zulip-quote-chip {
+  outline: 2px solid var(--brand);
+}
+
+.zulip-quote-chip-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--brand);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.zulip-quote-chip-preview {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

@@ -11,6 +11,8 @@ import { EditStatusModal } from './components/EditStatusModal';
 import { SettingsModal } from './components/SettingsModal';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ZulipProvider, useZulip, dmKey } from './context/ZulipContext';
+import type { ZulipMessage } from './api/types';
+import { buildQuote, excerptFromHtml, messagePermalink } from './lib/zulipMarkdown';
 
 // Themes that render light-on-dark. These get the `.dark` class so Tailwind's
 // dark: variants keep working, and they decide the toast palette.
@@ -31,7 +33,15 @@ function AppContent() {
     loading,
     typingUsers,
     updateUserStatus,
+    getMessageRaw,
+    serverUrl,
   } = useZulip();
+
+  // Named so the quote handler's dependency list reads clearly.
+  const composerQuoteSource = useCallback(
+    (message: ZulipMessage) => getMessageRaw(message.id),
+    [getMessageRaw]
+  );
 
   const composerRef = useRef<RichComposerHandle>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -207,12 +217,45 @@ function AppContent() {
     [uploadFile]
   );
 
-  const handleQuote = useCallback((senderName: string, content: string) => {
-    if (!composerRef.current) return;
-    // Format as Zulip quote and insert as raw text so TipTap doesn't parse @**name** as bold
-    const quoted = `@**${senderName}** said:\n\`\`\`quote\n${content}\n\`\`\`\n`;
-    composerRef.current.insertRawText(quoted);
-  }, []);
+  const handleQuote = useCallback(
+    async (message: ZulipMessage) => {
+      if (!composerRef.current) return;
+
+      // Quote the SOURCE markdown, not the rendered HTML. Scraping text lost
+      // mentions, images and nested quotes, and flattened them into prose.
+      let raw = '';
+      try {
+        raw = await composerQuoteSource(message);
+      } catch (err) {
+        console.error('Failed to fetch raw message for quote:', err);
+      }
+      if (!raw) {
+        // Server refused or returned nothing — a plain-text quote still beats
+        // no quote, so degrade rather than dropping the interaction.
+        raw = excerptFromHtml(message.content, 2000);
+        toast.warning('Quoted as plain text', {
+          description: "Couldn't load the original message's formatting.",
+        });
+      }
+
+      const streamName =
+        message.type === 'stream'
+          ? subscriptions.find((s) => s.stream_id === message.stream_id)?.name
+          : undefined;
+
+      composerRef.current.insertQuote({
+        raw: buildQuote({
+          rawContent: raw,
+          senderName: message.sender_full_name,
+          senderId: message.sender_id,
+          permalink: messagePermalink(serverUrl, message, streamName) ?? undefined,
+        }),
+        label: `Quoting ${message.sender_full_name}`,
+        preview: excerptFromHtml(message.content),
+      });
+    },
+    [composerQuoteSource, subscriptions, serverUrl]
+  );
 
   // Show sign-in page if not authenticated
   if (!currentUser) {

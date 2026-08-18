@@ -13,7 +13,7 @@ import { EmojiPicker } from './EmojiPicker';
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 
 interface MessageListProps {
-  onQuote?: (senderName: string, content: string) => void;
+  onQuote?: (message: ZulipMessage) => void;
 }
 
 export function MessageList({ onQuote }: MessageListProps = {}) {
@@ -407,14 +407,10 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     return Object.values(groups);
   };
 
-  // Build Zulip-style quote from a message
+  // Hand the whole message up; the quote block is built from its raw markdown
+  // (fetched on demand), not from the rendered HTML we happen to be showing.
   const handleQuote = useCallback((message: ZulipMessage) => {
-    if (!onQuote) return;
-    // Extract text from HTML content
-    const div = document.createElement('div');
-    div.innerHTML = message.content;
-    const text = div.textContent || div.innerText || '';
-    onQuote(message.sender_full_name, text.trim());
+    onQuote?.(message);
   }, [onQuote]);
 
   // Render emoji: unicode emoji from codepoint, or custom emoji image
