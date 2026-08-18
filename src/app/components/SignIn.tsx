@@ -1,20 +1,37 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Server, Mail, Key, LogIn } from 'lucide-react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { useZulip } from '../context/ZulipContext';
+import { loadCredentials } from '../api/credentialStore';
+
+const DEFAULT_SERVER =
+  import.meta.env.VITE_DEFAULT_ZULIP_SERVER ?? 'https://zulip.cyburity.com';
 
 export function SignIn() {
   const { login, loading: autoLogging } = useZulip();
 
-  // Pre-fill from cached credentials if available
-  const cached = localStorage.getItem('zulip_credentials');
-  const defaults = cached ? JSON.parse(cached) : null;
+  const [server, setServer] = useState(DEFAULT_SERVER);
+  const [email, setEmail] = useState('');
+  const [apiKey, setApiKey] = useState('');
 
-  const [server, setServer] = useState(defaults?.server || 'https://zulip.cyburity.com');
-  const [email, setEmail] = useState(defaults?.email || '');
-  const [apiKey, setApiKey] = useState(defaults?.apiKey || '');
+  // Pre-fill from the credential store. This used to read (and JSON.parse)
+  // localStorage inline during render: a corrupt value threw straight out of
+  // the component and white-screened the app, and once credentials moved into
+  // Electron's encrypted store the prefill silently stopped working anyway.
+  useEffect(() => {
+    let cancelled = false;
+    loadCredentials()
+      .then((cached) => {
+        if (cancelled || !cached) return;
+        setServer((v) => v || cached.server || DEFAULT_SERVER);
+        setEmail((v) => v || cached.email || '');
+      })
+      .catch(() => { /* no prefill — the form still works */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 

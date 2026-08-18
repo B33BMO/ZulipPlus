@@ -6,6 +6,8 @@
 // exists. Renderer-only — no Electron-specific code, so this ports to
 // Tauri verbatim.
 
+import { platform } from '../platform';
+
 const REPO = 'b33bmo/zulipplus';
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 
@@ -41,7 +43,7 @@ export const CURRENT_VERSION: string = (typeof __APP_VERSION__ !== 'undefined'
 
 export async function checkForUpdate(signal?: AbortSignal): Promise<UpdateInfo | null> {
   try {
-    const res = await fetch(RELEASES_API, {
+    const res = await platform.fetch(RELEASES_API, {
       headers: { Accept: 'application/vnd.github+json' },
       signal,
     });

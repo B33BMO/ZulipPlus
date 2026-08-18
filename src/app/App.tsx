@@ -12,6 +12,13 @@ import { SettingsModal } from './components/SettingsModal';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ZulipProvider, useZulip, dmKey } from './context/ZulipContext';
 
+// Themes that render light-on-dark. These get the `.dark` class so Tailwind's
+// dark: variants keep working, and they decide the toast palette.
+const DARK_THEMES = new Set([
+  'dark', 'ink', 'dracula', 'catppuccin', 'gruvbox',
+  'solarized-dark', 'nord', 'tokyo-night', 'one-dark',
+]);
+
 function AppContent() {
   const {
     currentUser,
@@ -50,11 +57,7 @@ function AppContent() {
   // `data-theme` attribute that CSS in theme.css picks up to override tokens.
   useEffect(() => {
     const root = document.documentElement;
-    const darkThemes = new Set([
-      'dark', 'ink', 'dracula', 'catppuccin', 'gruvbox',
-      'solarized-dark', 'nord', 'tokyo-night', 'one-dark',
-    ]);
-    if (darkThemes.has(theme)) {
+    if (DARK_THEMES.has(theme)) {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
@@ -436,7 +439,7 @@ function AppContent() {
         onLogout={handleLogout}
       />
       <Toaster
-        theme={theme}
+        theme={DARK_THEMES.has(theme) ? 'dark' : 'light'}
         position="bottom-right"
         richColors
         closeButton

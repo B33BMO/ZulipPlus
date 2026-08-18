@@ -113,6 +113,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
           'prose prose-invert prose-sm max-w-none px-3 py-2 min-h-[44px] max-h-[200px] overflow-y-auto outline-none text-gray-200 text-sm',
       },
       handleKeyDown: (_view, event) => {
+        // `isComposing` (and the legacy keyCode 229) mean an IME is still
+        // resolving a candidate — Enter there commits the candidate, it does
+        // not mean "send". Without this guard, typing in Japanese/Chinese/
+        // Korean fires off half-finished messages.
+        if (event.isComposing || event.keyCode === 229) return false;
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
           handleSendRef.current();
@@ -235,7 +240,11 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     if (!editor || sending) return;
 
     // Get markdown content from editor
-    const markdown = editor.storage.markdown.getMarkdown();
+    // tiptap-markdown augments `editor.storage` at runtime but ships no
+    // type augmentation for it.
+    const markdown = (
+      editor.storage as unknown as { markdown: { getMarkdown: () => string } }
+    ).markdown.getMarkdown();
     if (!markdown.trim()) return;
 
     setSending(true);
@@ -271,9 +280,15 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     const onUpdate = () => {
       const { from } = editor.state.selection;
       const textBefore = editor.state.doc.textBetween(Math.max(0, from - 50), from, '\n');
-      const match = textBefore.match(/@([A-Za-z ]*)$/);
+      // Trigger only at a word boundary (so `user@example.com` doesn't open
+      // the popup), allow any letter/mark plus the punctuation real names
+      // contain, and cap at two words so a stray "@" doesn't keep the popup
+      // latched open for the rest of the sentence.
+      const match = textBefore.match(/(?:^|[\s(])@([\p{L}\p{M}\d._'-]*(?:[ ][\p{L}\p{M}\d._'-]+)?)$/u);
       if (match) {
-        mentionStartRef.current = from - match[0].length;
+        // match[0] can include the boundary character before '@' — anchor the
+        // replacement range at the '@' so we don't eat the preceding space.
+        mentionStartRef.current = from - match[0].length + match[0].indexOf('@');
         setMentionQuery(match[1]);
         setMentionIndex(0);
         try {
@@ -364,6 +379,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   useEffect(() => {
     if (mentionQuery === null || !editor) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setMentionIndex((i) => Math.min(i + 1, mentionUsers.length - 1));
@@ -388,10 +404,13 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   }, [mentionQuery, mentionUsers, mentionIndex, insertMention, editor]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await handleFileUploadInternal(file);
+    const files = Array.from(e.target.files ?? []);
+    // Reset the input up-front so picking the same file twice in a row still
+    // fires a change event.
     if (fileInputRef.current) fileInputRef.current.value = '';
+    for (const file of files) {
+      await handleFileUploadInternal(file);
+    }
   };
 
   const handleEmojiSelect = (emoji: string) => {
@@ -709,6 +728,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         className="hidden"
         onChange={handleFileSelect}
       />

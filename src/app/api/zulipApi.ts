@@ -12,27 +12,28 @@ import type {
   UpdateMessageFlagsResponse,
   GetPresenceResponse,
 } from './types';
+import { platform } from '../platform';
+
+// btoa() throws on any code point above U+00FF. Encode to UTF-8 bytes first
+// so non-ASCII email addresses can authenticate.
+function toBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 export class ZulipApi {
   private baseUrl: string;
   public authHeader: string;
 
   constructor(serverUrl: string, email: string, apiKey: string) {
-    // In Electron production builds, call the Zulip server directly (no CORS in Electron).
-    // In dev mode (Vite dev server), use the proxy to avoid browser CORS.
-    const isElectron = !!(window as any).electronAPI?.isElectron;
-    const isDev = import.meta.env.DEV;
-
-    if (isElectron && !isDev) {
-      // Production Electron — direct API calls
-      const normalizedUrl = serverUrl.replace(/\/+$/, '');
-      this.baseUrl = `${normalizedUrl}/api/v1`;
-    } else {
-      // Dev mode (browser or Electron dev) — use Vite proxy
-      this.baseUrl = '/zulip-api/api/v1';
-    }
-
-    this.authHeader = 'Basic ' + btoa(`${email}:${apiKey}`);
+    // Whether we can reach the server directly or have to go through a dev
+    // proxy is a property of the shell we're running in, not of this class.
+    this.baseUrl = platform.apiBaseUrl(serverUrl);
+    // btoa() only handles Latin-1; API keys are ASCII but email addresses can
+    // carry non-ASCII characters, which would throw here.
+    this.authHeader = 'Basic ' + toBase64(`${email}:${apiKey}`);
   }
 
   async request<T>(
@@ -40,7 +41,7 @@ export class ZulipApi {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
-    const response = await fetch(url, {
+    const response = await platform.fetch(url, {
       ...options,
       headers: {
         Authorization: this.authHeader,
