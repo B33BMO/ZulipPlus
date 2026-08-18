@@ -1,0 +1,122 @@
+name: CI
+
+# Every push and PR gets type-checked, built, and packaged into a Windows
+# installer you can download from the run's Artifacts section.
+#
+# Pushing a `v*` tag additionally publishes a real GitHub Release with the
+# installer attached. Releases are deliberately tag-driven rather than
+# per-commit: the in-app update banner (src/app/api/updater.ts) reads the
+# *latest* release tag and compares it to package.json#version, so a release
+# per commit would either collide on the tag or produce releases that never
+# trigger the banner. Cut one with:
+#
+#     npm version patch && git push --follow-tags
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref supersedes an in-flight run. Tags are excluded
+# so a release build is never cancelled halfway through.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+    # A branch with an open PR fires both `push` and `pull_request`. The push
+    # event already covers same-repo PRs, so skip the duplicate run; PRs from
+    # forks still build, since no push event fires for those here.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Vite does not type-check on build, so this is the only thing standing
+      # between a type error and a shipped installer.
+      - name: Typecheck (renderer + electron)
+        run: npm run typecheck
+
+      - name: Build renderer
+        run: npm run build
+
+  windows:
+    name: Windows installer
+    needs: check
+    runs-on: windows-latest
+    # A branch with an open PR fires both `push` and `pull_request`. The push
+    # event already covers same-repo PRs, so skip the duplicate run; PRs from
+    # forks still build, since no push event fires for those here.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: write # needed by `gh release create` on tag builds
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # A tag whose version doesn't match package.json produces an installer
+      # that can never advertise itself as an update. Fail loudly instead.
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}."
+            echo "::error::Use 'npm version <patch|minor|major>' so the two stay in sync."
+            exit 1
+          fi
+          echo "Tag and package.json agree on ${pkg}."
+
+      # --publish never keeps electron-builder from inferring a GitHub provider
+      # and uploading on its own; publishing is handled explicitly below so it
+      # only ever happens for tags.
+      - name: Package Windows installer
+        run: npm run electron:build -- --publish never
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zulipplus-windows-${{ github.sha }}
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.exe \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
