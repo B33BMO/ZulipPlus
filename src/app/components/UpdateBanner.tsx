@@ -8,6 +8,7 @@ import {
   CURRENT_VERSION,
   type UpdateInfo,
 } from '../api/updater';
+import { platform } from '../platform';
 
 // Slim banner that appears above the main UI when a newer GitHub Release
 // exists. "Download" opens the release page in the OS browser (the user
@@ -35,9 +36,7 @@ export function UpdateBanner() {
   if (!update) return null;
 
   const open = () => {
-    const api = (window as { electronAPI?: { openExternal?: (url: string) => void } }).electronAPI;
-    if (api?.openExternal) api.openExternal(update.htmlUrl);
-    else window.open(update.htmlUrl, '_blank', 'noopener,noreferrer');
+    platform.openExternal(update.htmlUrl).catch(() => {});
   };
 
   const dismiss = () => {

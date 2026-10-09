@@ -21,17 +21,19 @@ export interface ZulipPresence {
   };
 }
 
-export interface ZulipRealmPresence {
-  [email: string]: {
-    aggregated: {
-      status: 'active' | 'idle' | 'offline';
-      timestamp: number;
-    };
-    [client: string]: {
-      status: 'active' | 'idle';
-      timestamp: number;
-    };
+/** Per-user presence: an `aggregated` roll-up plus one entry per client. */
+export interface ZulipUserPresence {
+  aggregated?: {
+    status: 'active' | 'idle' | 'offline';
+    timestamp: number;
   };
+  [client: string]:
+    | { status: 'active' | 'idle' | 'offline'; timestamp: number }
+    | undefined;
+}
+
+export interface ZulipRealmPresence {
+  [email: string]: ZulipUserPresence;
 }
 
 export interface ZulipStream {
@@ -152,7 +154,10 @@ export interface SendMessageResponse {
 export interface UploadFileResponse {
   result: string;
   msg: string;
-  uri: string;
+  /** Zulip < 10. Removed in favour of `url` in newer servers. */
+  uri?: string;
+  /** Zulip >= 4.15 / 10.x. Preferred. */
+  url?: string;
 }
 
 export interface RegisterEventQueueResponse {
@@ -219,10 +224,23 @@ export interface TypingEvent extends ZulipEvent {
 export interface UpdateMessageEvent extends ZulipEvent {
   type: 'update_message';
   message_id: number;
+  /** Every message affected — a topic/stream move touches the whole thread. */
+  message_ids?: number[];
   rendered_content?: string;
   content?: string;
   subject?: string;
+  orig_subject?: string;
+  stream_id?: number;
+  new_stream_id?: number;
   edit_timestamp: number;
+}
+
+export interface UpdateMessageFlagsEvent extends ZulipEvent {
+  type: 'update_message_flags';
+  op: 'add' | 'remove';
+  flag: string;
+  messages: number[];
+  all?: boolean;
 }
 
 export interface DeleteMessageEvent extends ZulipEvent {

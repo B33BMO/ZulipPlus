@@ -11,15 +11,15 @@ interface SearchBarProps {
 }
 
 export function SearchBar({ onNavigateToStream, onNavigateToDm }: SearchBarProps) {
-  const { searchMessages, resolveUrl, currentUser, users } = useZulip();
+  const { searchMessages, resolveUrl, currentUser } = useZulip();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ZulipMessage[]>([]);
   const [searching, setSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
-  const abortRef = useRef<AbortController>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const abortRef = useRef<AbortController | undefined>(undefined);
 
   // Close on outside click
   useEffect(() => {

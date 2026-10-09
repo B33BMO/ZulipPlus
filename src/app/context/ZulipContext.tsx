@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ZulipApi } from '../api/zulipApi';
+import { platform } from '../platform';
 import { loadCredentials, saveCredentials, clearCredentials } from '../api/credentialStore';
 import type {
   ZulipUser,
@@ -19,6 +20,7 @@ import type {
   ReactionEvent,
   PresenceEvent,
   UpdateMessageEvent,
+  UpdateMessageFlagsEvent,
   DeleteMessageEvent,
   TypingEvent,
   RegisterEventQueueResponse,
@@ -68,7 +70,8 @@ interface ZulipContextValue {
   logout: () => void;
   loadTopics: (streamId: number) => Promise<void>;
   loadMessages: (narrow: ZulipNarrow[]) => Promise<void>;
-  loadOlderMessages: () => Promise<void>;
+  /** Prepends older messages; resolves with how many were added. */
+  loadOlderMessages: () => Promise<number>;
   sendMessage: (params: {
     type: 'stream' | 'direct';
     to: string | number | number[];
@@ -142,6 +145,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const loadNavTokenRef = useRef(0);
   // LRU of authenticated blob URLs; declared up-front so logout can revoke them.
   const blobCache = useRef<Map<string, string>>(new Map());
+  const inflightBlobs = useRef<Map<string, Promise<string>>>(new Map());
   const BLOB_CACHE_MAX = 200;
   // Zulip is pull-based for presence: we ping every 60s to keep our own
   // presence fresh AND to receive updated peer presences in the response.
@@ -149,6 +153,23 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   // Cache of user_id → email for fast lookup inside the event loop without
   // depending on the (potentially stale) `users` state captured by closures.
   const userEmailByIdRef = useRef<Map<number, string>>(new Map());
+  // Timestamp of the last real user interaction. The presence ping used to
+  // hard-code 'active', which meant you showed up green to the whole realm
+  // even after the laptop had been shut for a day.
+  const lastActivityRef = useRef<number>(Date.now());
+  const IDLE_AFTER_MS = 5 * 60_000;
+
+  useEffect(() => {
+    const bump = () => { lastActivityRef.current = Date.now(); };
+    const events: (keyof WindowEventMap)[] = ['mousemove', 'mousedown', 'keydown', 'wheel', 'focus'];
+    for (const e of events) window.addEventListener(e, bump, { passive: true });
+    const onVisible = () => { if (document.visibilityState === 'visible') bump(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      for (const e of events) window.removeEventListener(e, bump);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
 
   useEffect(() => {
     apiRef.current = api;
@@ -187,17 +208,8 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
 
   const startEventLoop = useCallback(
     async (zApi: ZulipApi, myId?: number) => {
-      // Resolve a Zulip-relative URL to something fetchable in current runtime.
-      const resolveUrlFn = (url: string) => {
-        if (!url) return '';
-        if (url.startsWith('http://') || url.startsWith('https://')) return url;
-        const isElectron = !!(window as any).electronAPI?.isElectron;
-        const isDev = import.meta.env.DEV;
-        if (isElectron && !isDev) {
-          return `${serverUrlRef.current.replace(/\/+$/, '')}${url}`;
-        }
-        return `/zulip-api${url}`;
-      };
+      // Resolve a Zulip-relative URL to something fetchable in this runtime.
+      const resolveUrlFn = (url: string) => platform.assetUrl(serverUrlRef.current, url);
 
       try {
         let reg = await zApi.registerEventQueue();
@@ -347,22 +359,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                         ? msg.sender_full_name
                         : `${msg.sender_full_name} (#${typeof msg.display_recipient === 'string' ? msg.display_recipient : ''} > ${msg.subject})`;
                       const icon = resolveUrlFn(msg.avatar_url);
-                      const electronAPI = (window as any).electronAPI;
-                      if (electronAPI?.showNotification) {
-                        electronAPI.showNotification({ title, body: text, icon }).catch(() => {});
-                      } else if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-                        try {
-                          const note = new Notification(title, { body: text, icon, tag: `zulip-${msg.id}` });
-                          note.onclick = () => {
-                            const api = (window as any).electronAPI;
-                            if (api?.focusWindow) api.focusWindow();
-                            else window.focus();
-                            note.close();
-                          };
-                        } catch {
-                          new Notification(title, { body: text });
-                        }
-                      }
+                      platform
+                        .notify({ title, body: text, icon, tag: `zulip-${msg.id}` })
+                        .catch(() => {});
                     }
                   }
                   // Bump the DM/huddle conversation to the top of the list.
@@ -401,21 +400,70 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                 }
                 case 'update_message': {
                   const ue = event as UpdateMessageEvent;
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.id === ue.message_id
-                        ? {
-                            ...m,
-                            ...(ue.rendered_content && {
-                              content: ue.rendered_content,
-                            }),
-                            ...(ue.content && { content: ue.content }),
-                            ...(ue.subject && { subject: ue.subject }),
-                            last_edit_timestamp: ue.edit_timestamp,
-                          }
-                        : m
-                    )
+                  // Zulip sends BOTH `content` (raw markdown) and
+                  // `rendered_content` (HTML) on a content edit. MessageList
+                  // renders `content` as HTML, so we must take rendered_content
+                  // — taking raw markdown made every edited message display
+                  // literal `**bold**` / `[text](url)` until reload.
+                  const isContentEdit =
+                    typeof ue.rendered_content === 'string' || typeof ue.content === 'string';
+                  const newContent = ue.rendered_content ?? ue.content;
+                  // A topic/stream move applies to EVERY id in `message_ids`;
+                  // `message_id` alone only covers the message that was edited.
+                  const movedIds = new Set(
+                    Array.isArray(ue.message_ids) && ue.message_ids.length > 0
+                      ? ue.message_ids
+                      : [ue.message_id]
                   );
+                  const isMove =
+                    typeof ue.subject === 'string' || typeof ue.new_stream_id === 'number';
+                  setMessages((prev) => {
+                    const next = prev.map((m) => {
+                      const edited = m.id === ue.message_id && isContentEdit;
+                      const moved = movedIds.has(m.id) && isMove;
+                      if (!edited && !moved) return m;
+                      const out = { ...m };
+                      if (edited && newContent !== undefined) {
+                        out.content = newContent;
+                        // Only a content edit gets the "(edited)" marker —
+                        // a topic move isn't an edit of the message body.
+                        out.last_edit_timestamp = ue.edit_timestamp;
+                      }
+                      if (moved) {
+                        if (typeof ue.subject === 'string') out.subject = ue.subject;
+                        if (typeof ue.new_stream_id === 'number') out.stream_id = ue.new_stream_id;
+                      }
+                      return out;
+                    });
+                    // Messages moved out of the narrow we're looking at should
+                    // leave the view rather than linger under the old topic.
+                    const narrow = currentNarrowRef.current;
+                    if (!isMove || narrow.length === 0) return next;
+                    const topicOp = narrow.find(
+                      (n) => n.operator === 'topic' || n.operator === 'subject'
+                    );
+                    const streamOp = narrow.find(
+                      (n) => n.operator === 'stream' || n.operator === 'channel'
+                    );
+                    if (!topicOp && !streamOp) return next;
+                    return next.filter((m) => {
+                      if (!movedIds.has(m.id)) return true;
+                      if (
+                        topicOp &&
+                        String(m.subject).toLowerCase() !== String(topicOp.operand).toLowerCase()
+                      ) {
+                        return false;
+                      }
+                      if (
+                        streamOp &&
+                        typeof streamOp.operand === 'number' &&
+                        m.stream_id !== streamOp.operand
+                      ) {
+                        return false;
+                      }
+                      return true;
+                    });
+                  });
                   break;
                 }
                 case 'delete_message': {
@@ -431,6 +479,15 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                     prev.map((m) => {
                       if (m.id !== re.message_id) return m;
                       if (re.op === 'add') {
+                        // A re-registered event queue can replay reactions we
+                        // already have; without this guard the count doubles.
+                        if (
+                          m.reactions.some(
+                            (r) => r.user_id === re.user_id && r.emoji_name === re.emoji_name
+                          )
+                        ) {
+                          return m;
+                        }
                         return {
                           ...m,
                           reactions: [
@@ -532,6 +589,25 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   }
                   break;
                 }
+                case 'update_message_flags': {
+                  // Read/starred state changed — usually because the same
+                  // account acted from another device. We register for this
+                  // event type but previously dropped it on the floor, so
+                  // reading a thread on mobile left it bold here.
+                  const fe = event as UpdateMessageFlagsEvent;
+                  if (!Array.isArray(fe.messages) || fe.messages.length === 0) break;
+                  const flagIds = new Set(fe.messages);
+                  setMessages((prev) =>
+                    prev.map((m) => {
+                      if (!flagIds.has(m.id)) return m;
+                      const flags = new Set(m.flags ?? []);
+                      if (fe.op === 'add') flags.add(fe.flag);
+                      else flags.delete(fe.flag);
+                      return { ...m, flags: Array.from(flags) };
+                    })
+                  );
+                  break;
+                }
                 case 'subscription': {
                   // Reload subscriptions on changes
                   const subsRes = await zApi.getSubscriptions();
@@ -591,27 +667,20 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const autoLoginAttempted = useRef(false);
 
   // ── Actions ───────────────────────────────────────────
-  const login = useCallback(
+  const loginInner = useCallback(
     async (server: string, email: string, apiKey: string) => {
-      setLoading(true);
       const zApi = new ZulipApi(server, email, apiKey);
 
       // Validate credentials
       const profile = await zApi.getProfile();
 
-      // Tell main process which origin to scope the CORS/Origin header
-      // rewrites to. After this point, third-party fetches (image CDNs,
-      // GIPHY, etc.) won't get force-allowed CORS responses.
-      try {
-        (window as any).electronAPI?.setServerUrl?.(server);
-      } catch {
-        // ignore — non-Electron context
-      }
+      // Tell the shell which origin to scope any origin-specific handling to.
+      // Under Electron this narrows the CORS header rewrites to this one host,
+      // so third-party fetches (image CDNs, GIPHY, …) stop getting
+      // force-allowed CORS responses.
+      platform.setServerOrigin(server).catch(() => {});
 
-      // Request notification permission
-      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {});
-      }
+      platform.requestNotificationPermission().catch(() => {});
 
       // Fetch initial data in parallel. Users + subscriptions are required
       // to render the sidebar; presence and recent-DM history are best-effort
@@ -706,8 +775,6 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         .sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
       setDmConversations(dmConvos);
 
-      setLoading(false);
-
       // Cache credentials for auto-login. Encrypted via Electron's
       // safeStorage when available; fallback to localStorage in
       // browser-only dev. See src/app/api/credentialStore.ts.
@@ -723,7 +790,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       // only ever the initial snapshot from login.
       const pingPresence = async () => {
         try {
-          const res = await zApi.updatePresence('active');
+          const idle =
+            Date.now() - lastActivityRef.current > IDLE_AFTER_MS ||
+            (typeof document !== 'undefined' && document.visibilityState === 'hidden');
+          const res = await zApi.updatePresence(idle ? 'idle' : 'active');
           if (res.presences) {
             const emailMap = userEmailByIdRef.current;
             const byEmail = new Map<string, number>();
@@ -756,6 +826,22 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [startEventLoop]
   );
 
+  // `loading` gates the sign-in screen's spinner. It MUST be cleared on the
+  // failure path too — otherwise a bad API key (or a server that's down)
+  // leaves the app stuck on "Signing in..." forever with no error and no way
+  // back to the form short of restarting.
+  const login = useCallback(
+    async (server: string, email: string, apiKey: string) => {
+      setLoading(true);
+      try {
+        return await loginInner(server, email, apiKey);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loginInner]
+  );
+
   const logout = useCallback(() => {
     eventLoopRef.current = false;
     if (presencePingRef.current) {
@@ -776,6 +862,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       }
     }
     blobCache.current.clear();
+    inflightBlobs.current.clear();
     clearCredentials().catch(() => { /* ignore */ });
     setApi(null);
     setServerUrl('');
@@ -836,18 +923,28 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         const res = await api.getMessages({ narrow, num_before: 50, num_after: 0 });
         // Bail if a newer load (or logout) has started.
         if (loadNavTokenRef.current !== myToken) return;
-        setMessages(res.messages);
-        setHasMoreMessages(!res.found_oldest);
 
-        // Mark all loaded messages as read and clear unread counts
+        // Mark all loaded messages as read, and stamp the `read` flag onto our
+        // local copies. Without the local stamp the flags never change, so
+        // MessageList's mark-as-read effect re-fires — and re-POSTs the whole
+        // unread set — on every single incoming event.
         const unreadIds = res.messages
           .filter((m) => !(m.flags ?? []).includes('read'))
           .map((m) => m.id);
         if (unreadIds.length > 0) {
+          const unreadSet = new Set(unreadIds);
+          setMessages(
+            res.messages.map((m) =>
+              unreadSet.has(m.id) ? { ...m, flags: [...(m.flags ?? []), 'read'] } : m
+            )
+          );
           api
             .updateMessageFlags({ messages: unreadIds, op: 'add', flag: 'read' })
             .catch(() => {});
+        } else {
+          setMessages(res.messages);
         }
+        setHasMoreMessages(!res.found_oldest);
 
         // Clear local unread counts for this narrow
         const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
@@ -912,9 +1009,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const loadOlderMessages = useCallback(
-    async () => {
+    async (): Promise<number> => {
       const cur = messagesRef.current;
-      if (!api || loadingOlder || !hasMoreMessages || cur.length === 0) return;
+      if (!api || loadingOlder || !hasMoreMessages || cur.length === 0) return 0;
       const myToken = loadNavTokenRef.current;
       const narrowAtRequest = currentNarrowRef.current;
       setLoadingOlder(true);
@@ -926,12 +1023,13 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
           num_before: 50,
           num_after: 0,
         });
-        if (loadNavTokenRef.current !== myToken) return;
+        if (loadNavTokenRef.current !== myToken) return 0;
         const olderMessages = res.messages.filter((m) => m.id < oldestId);
         if (olderMessages.length > 0) {
           setMessages((prev) => [...olderMessages, ...prev]);
         }
         setHasMoreMessages(!res.found_oldest);
+        return olderMessages.length;
       } finally {
         if (loadNavTokenRef.current === myToken) setLoadingOlder(false);
       }
@@ -956,7 +1054,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     async (file: File): Promise<string> => {
       if (!api) throw new Error('Not connected');
       const res = await api.uploadFile(file);
-      return res.uri;
+      // `uri` was renamed to `url` in newer Zulip releases; accept either so
+      // uploads don't silently insert "undefined" as the link target.
+      const uploaded = res.url ?? res.uri;
+      if (!uploaded) throw new Error('Upload succeeded but the server returned no URL');
+      return uploaded;
     },
     [api]
   );
@@ -1007,6 +1109,18 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const markMessagesAsRead = useCallback(
     async (messageIds: number[]) => {
       if (!api || messageIds.length === 0) return;
+      // Stamp the flag locally first so callers observing `messages` stop
+      // treating these as unread immediately (and don't re-submit them).
+      const markedSet = new Set(messageIds);
+      setMessages((prev) => {
+        let changed = false;
+        const next = prev.map((m) => {
+          if (!markedSet.has(m.id) || (m.flags ?? []).includes('read')) return m;
+          changed = true;
+          return { ...m, flags: [...(m.flags ?? []), 'read'] };
+        });
+        return changed ? next : prev;
+      });
       await api.updateMessageFlags({
         messages: messageIds,
         op: 'add',
@@ -1087,18 +1201,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   const resolveUrl = useCallback(
-    (url: string): string => {
-      if (!url) return '';
-      // Already absolute
-      if (url.startsWith('http://') || url.startsWith('https://')) return url;
-      // Relative URL from Zulip — proxy through /zulip-api in dev, direct in prod
-      const isElectron = !!(window as any).electronAPI?.isElectron;
-      const isDev = import.meta.env.DEV;
-      if (isElectron && !isDev) {
-        return `${serverUrl.replace(/\/+$/, '')}${url}`;
-      }
-      return `/zulip-api${url}`;
-    },
+    (url: string): string => platform.assetUrl(serverUrl, url),
     [serverUrl]
   );
 
@@ -1114,10 +1217,16 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         blobCache.current.set(url, cached);
         return cached;
       }
+      // Coalesce concurrent requests for the same URL. Two <img> tags pointing
+      // at one attachment used to each create a blob URL; the second `set`
+      // orphaned the first, leaking it for the life of the session.
+      const inflight = inflightBlobs.current.get(url);
+      if (inflight) return inflight;
 
+      const job = (async () => {
       try {
         const resolved = resolveUrl(url);
-        const res = await fetch(resolved, {
+        const res = await platform.fetch(resolved, {
           headers: api ? { Authorization: (api as any).authHeader } : {},
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1138,7 +1247,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         return blobUrl;
       } catch {
         return resolveUrl(url);
+      } finally {
+        inflightBlobs.current.delete(url);
       }
+      })();
+      inflightBlobs.current.set(url, job);
+      return job;
     },
     [api, resolveUrl]
   );
