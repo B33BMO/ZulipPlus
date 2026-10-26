@@ -5,6 +5,7 @@
 import { Node, mergeAttributes, type Editor } from '@tiptap/core';
 import { Text as TiptapText } from '@tiptap/extension-text';
 import { Table } from '@tiptap/extension-table';
+import Image from '@tiptap/extension-image';
 import { TextSelection } from '@tiptap/pm/state';
 import type { MarkdownSerializerState } from 'prosemirror-markdown';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
@@ -219,6 +220,31 @@ export const ZulipTable = Table.extend({
           // markdown-it parses GFM tables into table HTML, which the node's
           // own parseHTML rules pick up.
         },
+      },
+    };
+  },
+});
+
+/**
+ * Images, sent the way Zulip wants them: `[](url)`.
+ *
+ * Zulip's markdown has no `![alt](url)` image syntax: that arrived as a
+ * literal "!" plus the whole link text, with Zulip's own preview underneath.
+ * An empty-text link to an image URL is Zulip's idiom (its own GIF picker
+ * inserts exactly this) and renders as just the image.
+ */
+export const ZulipImage = Image.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state: MarkdownSerializerState, node: ProseMirrorNode) {
+          const src = String(node.attrs.src ?? '');
+          if (!src) return;
+          // Parentheses and spaces would end the link destination early.
+          const safe = src.replace(/[()\s]/g, (c) => encodeURIComponent(c));
+          state.write(`[](${safe})`);
+        },
+        parse: {},
       },
     };
   },

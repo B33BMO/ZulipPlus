@@ -2,10 +2,9 @@ import { useCallback, useRef, useState, useEffect, useImperativeHandle, forwardR
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
-import Image from '@tiptap/extension-image';
 import { Markdown } from 'tiptap-markdown';
 import { TableRow, TableHeader, TableCell } from '@tiptap/extension-table';
-import { PlainText, ZulipQuote, ZulipTable, insertQuoteNode, type ZulipQuoteAttrs } from './editor/extensions';
+import { PlainText, ZulipImage, ZulipQuote, ZulipTable, insertQuoteNode, type ZulipQuoteAttrs } from './editor/extensions';
 import { useZulip } from '../context/ZulipContext';
 import type { TypingTarget } from '../api/types';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
@@ -137,7 +136,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       TableHeader,
       TableCell,
       Placeholder.configure({ placeholder }),
-      Image.configure({
+      ZulipImage.configure({
         inline: true,
         HTMLAttributes: { class: 'max-w-full max-h-48 rounded inline' },
       }),
@@ -529,8 +528,16 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
 
   const handleGifSelect = (gifUrl: string, altText: string) => {
     if (!editor) return;
-    // Insert as markdown image link for Zulip
-    editor.chain().focus().insertContent(`![${altText}](${gifUrl})`).run();
+    // A real image node (previewed in the composer), sent as Zulip's
+    // `[](url)` by ZulipImage. A space after keeps typing off the image.
+    editor
+      .chain()
+      .focus()
+      .insertContent([
+        { type: 'image', attrs: { src: gifUrl, alt: altText, title: altText } },
+        { type: 'text', text: ' ' },
+      ])
+      .run();
     setShowGifPicker(false);
   };
 
