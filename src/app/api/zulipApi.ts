@@ -105,6 +105,17 @@ export class ZulipApi {
     return res as ZulipUser;
   }
 
+  // Public server/organization info (name, icon, version). Needs no auth,
+  // so it answers even when /register is failing.
+  async getServerSettings(): Promise<{
+    realm_name?: string;
+    realm_icon?: string;
+    zulip_version?: string;
+    zulip_feature_level?: number;
+  }> {
+    return this.request('/server_settings');
+  }
+
   // ── Users ─────────────────────────────────────────────
   async getUsers(): Promise<GetUsersResponse> {
     return this.request('/users');

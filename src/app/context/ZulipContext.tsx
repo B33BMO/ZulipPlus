@@ -179,8 +179,10 @@ interface ZulipContextValue {
   setInvisible: (invisible: boolean) => Promise<void>;
   /** The realm's GIPHY key, or '' if the server doesn't configure one. */
   giphyApiKey: string;
-  /** Organization display name ('' until /register answers). */
+  /** Organization display name ('' until the server answers). */
   realmName: string;
+  /** The org's uploaded icon, or '' when it only has Zulip's Gravatar default. */
+  realmIconUrl: string;
   /** Unread messages that mention you, for the Mentions badge. */
   unreadMentionCount: number;
   /** Recent unread messages across every conversation (Inbox previews). */
@@ -247,6 +249,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const [presenceEnabled, setPresenceEnabled] = useState(true);
   const [giphyApiKey, setGiphyApiKey] = useState('');
   const [realmName, setRealmName] = useState('');
+  const [realmIconUrl, setRealmIconUrl] = useState('');
   const [unreadMentionCount, setUnreadMentionCount] = useState(0);
   const currentNarrowRef = useRef<ZulipNarrow[]>([]);
 
@@ -394,6 +397,9 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       if (typeof enabled === 'boolean') setPresenceEnabled(enabled);
       setGiphyApiKey(reg.giphy_api_key ?? '');
       if (reg.realm_name) setRealmName(reg.realm_name);
+      if (reg.realm_icon_url !== undefined) {
+        setRealmIconUrl(reg.realm_icon_source === 'U' ? reg.realm_icon_url : '');
+      }
     },
     [publishUnread]
   );
@@ -1070,6 +1076,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       setUsers(usersRes.members);
       setSubscriptions(subsRes.subscriptions);
 
+      // Org name and icon from the public endpoint, so they show straight
+      // away rather than waiting on /register. A Gravatar icon is Zulip's
+      // generated default, not something the org chose: skip it.
+      zApi
+        .getServerSettings()
+        .then((ss) => {
+          if (ss.realm_name) setRealmName(ss.realm_name);
+          if (ss.realm_icon && !/gravatar\.com/i.test(ss.realm_icon)) setRealmIconUrl(ss.realm_icon);
+        })
+        .catch(() => {});
+
       // Fetch realm custom emoji (non-blocking)
       zApi.request<{ result: string; emoji: Record<string, { id: string; name: string; source_url: string; deactivated: boolean }> }>('/realm/emoji')
         .then((res) => {
@@ -1219,6 +1236,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     mentionIdsRef.current.clear();
     setUnreadMentionCount(0);
     setRealmName('');
+    setRealmIconUrl('');
     setConnectionError(null);
     setUnreadCounts({ streams: {}, pms: {} });
     setDmConversations([]);
@@ -1772,6 +1790,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         setInvisible,
         giphyApiKey,
         realmName,
+        realmIconUrl,
         unreadMentionCount,
         fetchUnreadMessages,
         renameTopic,

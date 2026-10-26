@@ -105,8 +105,12 @@ export function Sidebar({
     resolveUrl,
     muteStream,
     realmName,
+    realmIconUrl,
     serverUrl,
   } = useZulip();
+  // Fall back to our own mark if the org icon fails to load.
+  const [iconFailed, setIconFailed] = useState(false);
+  useEffect(() => setIconFailed(false), [realmIconUrl]);
   const [expandedStreams, setExpandedStreams] = useState<Set<number>>(new Set());
   const [showAllTopics, setShowAllTopics] = useState<Set<number>>(new Set());
   const [showAllDMs, setShowAllDMs] = useState(false);
@@ -294,7 +298,16 @@ export function Sidebar({
     >
       {/* Workspace + collapse */}
       <div className="flex items-center gap-2 px-4 pt-3 pb-2">
-        <Logo size={22} className="shrink-0" />
+        {realmIconUrl && !iconFailed ? (
+          <img
+            src={resolveUrl(realmIconUrl)}
+            alt=""
+            onError={() => setIconFailed(true)}
+            className="size-[22px] rounded-md object-cover shrink-0"
+          />
+        ) : (
+          <Logo size={22} className="shrink-0" />
+        )}
         <span className="font-semibold text-[13px] text-text-primary truncate">{workspaceName}</span>
         <button
           onClick={onToggleCollapse}

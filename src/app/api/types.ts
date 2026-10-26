@@ -189,6 +189,9 @@ export interface RegisterEventQueueResponse {
   giphy_api_key?: string;
   /** From fetch_event_types 'realm': the organization's display name. */
   realm_name?: string;
+  /** From 'realm': the org icon. 'U' = uploaded, 'G' = Gravatar fallback. */
+  realm_icon_url?: string;
+  realm_icon_source?: 'G' | 'U';
 }
 
 export interface ZulipUserStatus {
