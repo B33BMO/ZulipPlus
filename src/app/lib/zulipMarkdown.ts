@@ -103,10 +103,35 @@ export function buildQuote({ rawContent, senderName, senderId, permalink }: Quot
   return `${mention} ${said}:\n${fence}quote\n${body}\n${fence}`;
 }
 
+/**
+ * Plain text of rendered message HTML.
+ *
+ * Parsed with DOMParser rather than `div.innerHTML = …`: assigning innerHTML
+ * on an element of the live document starts loading `<img>`s and runs their
+ * inline `onerror` handlers even though the element is never attached, so a
+ * hostile message body could execute script just by arriving.
+ */
+export function htmlToText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  return doc.body.textContent ?? '';
+}
+
 /** Short plain-text excerpt of rendered HTML, for composer previews. */
 export function excerptFromHtml(html: string, maxLength = 140): string {
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  const text = (div.textContent || '').replace(/\s+/g, ' ').trim();
+  const text = htmlToText(html).replace(/\s+/g, ' ').trim();
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+/**
+ * A stable colour for someone's name, so people are easy to pick out in a
+ * busy thread (especially in compact mode, which has no avatars).
+ *
+ * The hue comes from the user id (Knuth multiplicative hash onto 12 hues 30°
+ * apart). Lightness and chroma come from the theme (`--name-l`, `--name-c` in
+ * theme.css), and OKLCH keeps lightness perceptually even, so every hue has
+ * the same contrast against the background.
+ */
+export function nameColor(userId: number): string {
+  const hue = 15 + (((Math.imul(userId, 2654435761) >>> 0) % 12) * 30);
+  return `oklch(var(--name-l) var(--name-c) ${hue})`;
 }

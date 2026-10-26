@@ -150,18 +150,18 @@ export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
       {/* Search */}
       <div className="p-2 border-b border-surface-tertiary">
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-gray-500" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-text-muted" />
           <Input
             type="text"
             placeholder="Search emoji..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-8 pr-8 h-8 bg-surface-tertiary border-surface-tertiary text-gray-200 text-sm placeholder:text-gray-500"
+            className="pl-8 pr-8 h-8 bg-surface-tertiary border-surface-tertiary text-text-primary text-sm placeholder:text-text-muted"
           />
           {search && (
             <button
               onClick={() => setSearch('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
             >
               <X className="size-3.5" />
             </button>
@@ -177,7 +177,7 @@ export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
             className={`px-2 py-1 rounded text-xs whitespace-nowrap ${
               activeCategory === 'Custom'
                 ? 'bg-brand text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
+                : 'text-text-secondary hover:text-text-primary hover:bg-surface-hover'
             }`}
           >
             Custom
@@ -190,7 +190,7 @@ export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
             className={`px-2 py-1 rounded text-xs whitespace-nowrap ${
               activeCategory === cat.name
                 ? 'bg-brand text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-surface-hover'
+                : 'text-text-secondary hover:text-text-primary hover:bg-surface-hover'
             }`}
           >
             {cat.name}
@@ -202,7 +202,7 @@ export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
       <div className="flex-1 overflow-y-auto p-2">
         {activeCategory === 'Custom' && filteredCustom.length > 0 && (
           <div>
-            <p className="text-xs text-gray-500 uppercase font-semibold mb-1 px-1">
+            <p className="text-xs text-text-muted uppercase font-semibold mb-1 px-1">
               Custom
             </p>
             <div className="grid grid-cols-8 gap-0.5">
@@ -235,7 +235,7 @@ export function EmojiPicker({ onSelect, onReact }: EmojiPickerProps) {
           .map((cat) => (
             <div key={cat.name}>
               {search.trim() && (
-                <p className="text-xs text-gray-500 uppercase font-semibold mb-1 px-1">
+                <p className="text-xs text-text-muted uppercase font-semibold mb-1 px-1">
                   {cat.name}
                 </p>
               )}

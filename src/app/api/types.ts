@@ -105,6 +105,11 @@ export interface ZulipReaction {
   };
 }
 
+/** Who a typing notification is about: a DM's other participants, or one topic. */
+export type TypingTarget =
+  | { type: 'direct'; to: number[] }
+  | { type: 'stream'; streamId: number; topic: string };
+
 export interface ZulipNarrow {
   operator: string;
   operand: string | number;
@@ -171,7 +176,27 @@ export interface RegisterEventQueueResponse {
     pms: { sender_id: number; unread_message_ids: number[] }[];
     streams: { stream_id: number; topic: string; unread_message_ids: number[] }[];
     huddles: { user_ids_string: string; unread_message_ids: number[] }[];
+    /** Ids of unread messages that mention you (directly or via a wildcard). */
+    mentions?: number[];
   };
+  /** From fetch_event_types 'user_status'. Keyed by user id. */
+  user_status?: Record<string, ZulipUserStatus>;
+  /** From fetch_event_types 'user_settings' (Zulip 5.0+). */
+  user_settings?: { presence_enabled?: boolean };
+  /** Pre-5.0 servers return this at the top level instead. */
+  presence_enabled?: boolean;
+  /** From fetch_event_types 'realm'. Empty string when GIPHY isn't configured. */
+  giphy_api_key?: string;
+  /** From fetch_event_types 'realm': the organization's display name. */
+  realm_name?: string;
+}
+
+export interface ZulipUserStatus {
+  status_text?: string;
+  emoji_name?: string;
+  emoji_code?: string;
+  reaction_type?: string;
+  away?: boolean;
 }
 
 export interface GetEventsResponse {
@@ -196,8 +221,14 @@ export interface PresenceEvent extends ZulipEvent {
   type: 'presence';
   user_id: number;
   email: string;
-  presence: ZulipPresence;
+  // Per-client entries; some servers also include an `aggregated` roll-up.
+  presence: ZulipPresence & { aggregated?: { status: 'active' | 'idle'; timestamp: number } };
   server_timestamp: number;
+}
+
+export interface UserStatusEvent extends ZulipEvent, ZulipUserStatus {
+  type: 'user_status';
+  user_id: number;
 }
 
 export interface ReactionEvent extends ZulipEvent {
@@ -233,6 +264,8 @@ export interface UpdateMessageEvent extends ZulipEvent {
   stream_id?: number;
   new_stream_id?: number;
   edit_timestamp: number;
+  /** True for server-side re-renders (link previews etc.), not user edits. */
+  rendering_only?: boolean;
 }
 
 export interface UpdateMessageFlagsEvent extends ZulipEvent {
@@ -241,11 +274,25 @@ export interface UpdateMessageFlagsEvent extends ZulipEvent {
   flag: string;
   messages: number[];
   all?: boolean;
+  /** Present on op 'remove' for the read flag: where each message lives. */
+  message_details?: Record<
+    string,
+    {
+      type: 'stream' | 'private';
+      stream_id?: number;
+      topic?: string;
+      user_ids?: number[];
+      mentioned?: boolean;
+    }
+  >;
 }
 
 export interface DeleteMessageEvent extends ZulipEvent {
   type: 'delete_message';
-  message_ids: number[];
+  /** Sent when the client declares the bulk_message_deletion capability. */
+  message_ids?: number[];
+  /** Legacy single-message form. */
+  message_id?: number;
   message_type: 'stream' | 'private';
   stream_id?: number;
   topic?: string;

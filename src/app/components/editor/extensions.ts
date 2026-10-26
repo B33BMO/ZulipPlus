@@ -4,6 +4,7 @@
 
 import { Node, mergeAttributes, type Editor } from '@tiptap/core';
 import { Text as TiptapText } from '@tiptap/extension-text';
+import { Table } from '@tiptap/extension-table';
 import { TextSelection } from '@tiptap/pm/state';
 import type { MarkdownSerializerState } from 'prosemirror-markdown';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
@@ -139,3 +140,86 @@ export function insertQuoteNode(editor: Editor, attrs: ZulipQuoteAttrs): void {
   editor.view.dispatch(tr);
   editor.commands.focus();
 }
+
+/**
+ * Tables, always sent as a GFM pipe table (which Zulip renders).
+ *
+ * Without a table node at all, pasting a table (e.g. one copied out of a
+ * message) collapsed every cell into one run-on paragraph. tiptap-markdown's
+ * stock serializer handles only the tidy case: a header row, no merged cells,
+ * one paragraph per cell. Anything else came out as the literal text
+ * "[table]". It also left `|` inside cells unescaped, which splits the cell.
+ *
+ * This one always produces a table, accepting some loss for shapes markdown
+ * can't express: the first row is the header whatever it was, merged cells
+ * keep their content with blanks padding the span, and multi-paragraph cells
+ * are joined with spaces.
+ */
+export const ZulipTable = Table.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state: MarkdownSerializerState, node: ProseMirrorNode) {
+          // Render a cell's inline content in place, then cut it back out of
+          // the output buffer. Escaping has to happen after rendering:
+          // prosemirror-markdown writes code spans verbatim, bypassing the
+          // text serializer, and GFM needs `\|` even inside code spans.
+          const st = state as unknown as { out: string };
+          // Flush the blank line owed to the previous block *before* noting
+          // buffer positions; otherwise cutting a rendered cell back out
+          // removes that separator and glues the header row onto the line
+          // above.
+          state.write();
+          const renderCell = (cell: ProseMirrorNode): string => {
+            const parts: string[] = [];
+            cell.forEach((block) => {
+              if (!block.textContent.trim()) return;
+              const start = st.out.length;
+              state.renderInline(block);
+              parts.push(st.out.slice(start));
+              st.out = st.out.slice(0, start);
+            });
+            return parts
+              .join(' ')
+              .replace(/\\?\n/g, ' ') // hard breaks / newlines can't live in a cell
+              // Every pipe, even one after a backslash: that backslash is
+              // itself an escaped literal "\\", not an escape of the pipe.
+              .replace(/\|/g, '\\|')
+              .trim();
+          };
+
+          const rows: string[][] = [];
+          node.forEach((row) => {
+            const cells: string[] = [];
+            row.forEach((cell) => {
+              cells.push(renderCell(cell));
+              const span = Number(cell.attrs.colspan) || 1;
+              for (let i = 1; i < span; i++) cells.push('');
+            });
+            rows.push(cells);
+          });
+          if (rows.length === 0) return;
+
+          const width = Math.max(...rows.map((r) => r.length));
+          const line = (cells: string[]) => {
+            const padded = [...cells, ...Array(width - cells.length).fill('')];
+            return `| ${padded.join(' | ')} |`;
+          };
+          state.write(line(rows[0]));
+          state.ensureNewLine();
+          state.write(line(Array(width).fill('---')));
+          state.ensureNewLine();
+          for (const row of rows.slice(1)) {
+            state.write(line(row));
+            state.ensureNewLine();
+          }
+          state.closeBlock(node);
+        },
+        parse: {
+          // markdown-it parses GFM tables into table HTML, which the node's
+          // own parseHTML rules pick up.
+        },
+      },
+    };
+  },
+});

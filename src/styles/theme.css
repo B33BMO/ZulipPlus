@@ -7,24 +7,37 @@
 
   /* Surface colors (light theme) */
   --surface-primary: #ffffff;
-  --surface-secondary: #f2f3f5;
-  --surface-tertiary: #e3e5e8;
+  --surface-secondary: #f6f7f9;
+  --surface-tertiary: #eff1f4;
   --surface-overlay: #ffffff;
-  --surface-hover: #e8e9eb;
-  --surface-float: #f9fafb;
-  --surface-composer: #ebedef;
+  --surface-hover: #eff1f4;
+  --surface-float: #ffffff;
+  --surface-composer: #ffffff;
 
   /* Brand / accent */
-  --brand: #5865f2;
-  --brand-hover: #4752c4;
-  --brand-muted: rgba(88, 101, 242, 0.2);
+  --brand: #5e6ad2;
+  --brand-hover: #4f5bc0;
+  --brand-muted: rgba(94, 106, 210, 0.12);
 
   /* Text colors (light theme) */
-  --text-primary: #060607;
-  --text-secondary: #4e5058;
+  --text-primary: #15171a;
+  --text-secondary: #4e5560;
   /* Bumped from #80848e (~3.4:1 on light surfaces — failed WCAG AA) */
-  --text-muted: #5e636c;
-  --text-link: #006ce7;
+  --text-muted: #666d78;
+  --text-link: color-mix(in srgb, var(--brand) 82%, black);
+  /* Pro-tool layout tokens */
+  --surface-sidebar: #f6f7f9;
+  --surface-active: #e7eaee;
+  --line: #e3e5e9;
+  /* Lines inside message content (tables, quotes, spoilers). Derived from the
+     text colour so it reads on every theme. */
+  --rule: color-mix(in srgb, var(--text-muted) 38%, transparent);
+  /* Sender-name colours: oklch lightness/chroma per theme, hue per person.
+     Fixed perceptual lightness keeps every hue at the same contrast. */
+  --name-l: 0.46;
+  --name-c: 0.14;
+  --font-sans: 'Inter Variable', Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
   --card: #ffffff;
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -67,21 +80,26 @@
   --foreground: oklch(0.985 0 0);
 
   /* Surface colors (dark theme) */
-  --surface-primary: #313338;
-  --surface-secondary: #2b2d31;
-  --surface-tertiary: #1e1f22;
-  --surface-overlay: #111214;
-  --surface-hover: #404249;
-  --surface-float: #383a40;
-  --surface-composer: #383a40;
+  --surface-primary: #101114;
+  --surface-secondary: #16181c;
+  --surface-tertiary: #1b1e23;
+  --surface-overlay: #16181c;
+  --surface-hover: #1a1d22;
+  --surface-float: #16181c;
+  --surface-composer: #16181c;
 
   /* Brand inherits from :root unless overridden by accent */
 
   /* Text colors (dark theme) */
-  --text-primary: #f2f3f5;
-  --text-secondary: #b5bac1;
-  --text-muted: #949ba4;
-  --text-link: #00a8fc;
+  --text-primary: #e8eaed;
+  --text-secondary: #a3a9b3;
+  --text-muted: #888e98;
+  --text-link: color-mix(in srgb, var(--brand) 62%, white);
+  --surface-sidebar: #0b0c0e;
+  --surface-active: #21252b;
+  --line: #24272d;
+  --name-l: 0.8;
+  --name-c: 0.11;
   --card: oklch(0.145 0 0);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.145 0 0);
@@ -120,6 +138,14 @@
    Applied via a `data-theme="<name>"` attribute on <html>.
    Each one overrides only the tokens the UI actually reads
    (surfaces, text, borders, brand). */
+
+/* Named themes predate the sidebar/active/line tokens; derive them from each
+   theme's own palette (html[data-theme] outranks .dark). */
+html[data-theme] {
+  --surface-sidebar: var(--surface-secondary);
+  --surface-active: var(--surface-hover);
+  --line: var(--surface-tertiary);
+}
 
 /* High-contrast black-on-white */
 html[data-theme='paper'] {
@@ -379,6 +405,10 @@ html[data-theme='one-dark'] {
   --color-brand-hover: var(--brand-hover);
   --color-brand-muted: var(--brand-muted);
 
+  --color-surface-sidebar: var(--surface-sidebar);
+  --color-surface-active: var(--surface-active);
+  --color-line: var(--line);
+
   /* Text */
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
@@ -407,6 +437,12 @@ html[data-theme='one-dark'] {
 
   html {
     font-size: var(--font-size);
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'cv11', 'ss01';
   }
 
   h1 {

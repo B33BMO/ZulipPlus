@@ -1,33 +1,96 @@
-import { useState } from 'react';
-import { ChevronRight, ChevronDown, Hash, Menu, Users, Lock, Volume2, VolumeX, Search, X } from 'lucide-react';
+import { useEffect, useState, type ReactNode } from 'react';
+import {
+  AtSign,
+  ChevronDown,
+  ChevronRight,
+  Hash,
+  Inbox,
+  Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  Star,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
-import { Badge } from './ui/badge';
-import { Button } from './ui/button';
-import { Tabs, TabsList, TabsTrigger } from './ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { useZulip, dmKey, type UserStatus } from '../context/ZulipContext';
+import { Logo } from './Logo';
+
+export type SpecialView = 'inbox' | 'mentions' | 'starred';
 
 interface SidebarProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
-  activeView: 'channels' | 'users';
-  onViewChange: (view: 'channels' | 'users') => void;
   // Sorted user IDs of all participants in the target DM (incl. self).
   onSelectDM: (userIds: number[]) => void;
   onSelectTopic: (streamId: number, topicName: string) => void;
+  onSelectSpecial: (view: SpecialView) => void;
+  onOpenSearch: () => void;
   activeDM: number[] | null;
   activeTopic: { streamId: number; topicName: string } | null;
+  activeSpecial: SpecialView | null;
+  /** Rendered at the bottom: the current user / settings menu. */
+  footer: ReactNode;
+}
+
+// Below this many topics the list is scannable by eye and a search box is
+// just clutter; above it, finding a topic by scrolling is miserable.
+const TOPIC_FILTER_THRESHOLD = 8;
+// Topics shown per channel before "Show all".
+const TOPIC_LIMIT = 8;
+const DM_LIMIT = 6;
+
+const PRESENCE_COLOR: Record<UserStatus, string> = {
+  online: 'bg-[#3fb47c]',
+  idle: 'bg-[#d9a23a]',
+  offline: 'bg-transparent border-text-muted',
+};
+
+// Shared row styling: one height, one radius, hover/active from the theme.
+function rowClass(active: boolean, unread = false) {
+  return [
+    'group/row w-full flex items-center gap-2 h-7 px-2 rounded-md text-left text-[13px] outline-none',
+    'focus-visible:ring-2 focus-visible:ring-brand/60',
+    active
+      ? 'bg-surface-active text-text-primary'
+      : `${unread ? 'text-text-primary font-semibold' : 'text-text-secondary'} hover:bg-surface-hover hover:text-text-primary`,
+  ].join(' ');
+}
+
+function CountBadge({ count, accent = false }: { count: number; accent?: boolean }) {
+  if (count <= 0) return null;
+  const text = count > 999 ? '999+' : String(count);
+  return accent ? (
+    <span className="ml-auto min-w-[18px] h-[18px] px-1.5 rounded-full bg-brand text-white text-[11px] leading-[18px] text-center font-medium tabular-nums">
+      {text}
+    </span>
+  ) : (
+    <span className="ml-auto text-[11px] text-text-muted tabular-nums font-normal">{text}</span>
+  );
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="px-2 pb-1 text-[11px] font-medium text-text-muted tracking-[0.02em]">
+      {children}
+    </div>
+  );
 }
 
 export function Sidebar({
   isCollapsed,
   onToggleCollapse,
-  activeView,
-  onViewChange,
   onSelectDM,
   onSelectTopic,
+  onSelectSpecial,
+  onOpenSearch,
   activeDM,
   activeTopic,
+  activeSpecial,
+  footer,
 }: SidebarProps) {
   const {
     users,
@@ -37,53 +100,55 @@ export function Sidebar({
     getUserStatus,
     currentUser,
     unreadCounts,
+    unreadMentionCount,
     dmConversations,
     resolveUrl,
     muteStream,
+    realmName,
+    serverUrl,
   } = useZulip();
   const [expandedStreams, setExpandedStreams] = useState<Set<number>>(new Set());
+  const [showAllTopics, setShowAllTopics] = useState<Set<number>>(new Set());
   const [showAllDMs, setShowAllDMs] = useState(false);
   // Per-stream topic filter text, keyed by stream id.
   const [topicFilters, setTopicFilters] = useState<Record<number, string>>({});
 
-  // Below this many topics the list is scannable by eye and a search box is
-  // just clutter; above it, finding a topic by scrolling is miserable.
-  const TOPIC_FILTER_THRESHOLD = 8;
-
   const setTopicFilter = (streamId: number, value: string) =>
     setTopicFilters((prev) => ({ ...prev, [streamId]: value }));
 
-  const toggleStream = async (streamId: number) => {
-    const next = new Set(expandedStreams);
-    if (next.has(streamId)) {
-      next.delete(streamId);
-    } else {
-      next.add(streamId);
-      if (!topics[streamId]) {
-        await loadTopics(streamId);
-      }
-    }
-    setExpandedStreams(next);
+  // Expand immediately and (re)fetch topics in the background. Topics are
+  // always refetched: the event loop seeds `topics[id]` with just the one
+  // topic a new message landed in, so "already have some" doesn't mean
+  // "have the list".
+  const expandStream = (streamId: number) => {
+    setExpandedStreams((prev) => new Set(prev).add(streamId));
+    loadTopics(streamId).catch((err) => console.error('Failed to load topics:', err));
   };
 
-  const getStatusColor = (status: UserStatus) => {
-    switch (status) {
-      case 'online':
-        return 'bg-green-500';
-      case 'idle':
-        return 'bg-yellow-500';
-      case 'offline':
-      default:
-        return 'bg-gray-500';
+  const toggleStream = (streamId: number) => {
+    if (expandedStreams.has(streamId)) {
+      setExpandedStreams((prev) => {
+        const next = new Set(prev);
+        next.delete(streamId);
+        return next;
+      });
+    } else {
+      expandStream(streamId);
     }
   };
+
+  // Reveal the open topic's channel when navigation happens from outside the
+  // sidebar (search, links, notifications).
+  const activeStreamId = activeTopic?.streamId;
+  useEffect(() => {
+    if (activeStreamId === undefined) return;
+    setExpandedStreams((prev) => (prev.has(activeStreamId) ? prev : new Set(prev).add(activeStreamId)));
+  }, [activeStreamId]);
 
   const getStreamUnreadCount = (streamId: number) => {
     let count = 0;
     for (const [key, val] of Object.entries(unreadCounts.streams)) {
-      if (key.startsWith(`${streamId}:`)) {
-        count += val;
-      }
+      if (key.startsWith(`${streamId}:`)) count += val;
     }
     return count;
   };
@@ -93,435 +158,345 @@ export function Sidebar({
     return users.find((u) => u.user_id === userId);
   };
 
-  const otherUsers = users.filter(
-    (u) => u.user_id !== currentUser?.user_id && !u.is_bot && u.is_active
-  );
-
-  // Stable key of the currently-active DM, for highlight comparisons.
   const activeDmKey = activeDM ? dmKey(activeDM) : null;
 
-  // Display label for a DM/huddle: the OTHER participants joined by comma,
-  // or "<my name> (you)" for a self-DM.
+  // Other participants' names, or "<me> (you)" for a self-DM.
   const dmLabel = (userIds: number[]): string => {
-    if (!currentUser) return 'Direct Message';
+    if (!currentUser) return 'Direct message';
     const others = userIds.filter((id) => id !== currentUser.user_id);
     if (others.length === 0) return `${currentUser.full_name} (you)`;
     const names = others.map((id) => getUserById(id)?.full_name).filter(Boolean) as string[];
-    return names.length === 0 ? 'Direct Message' : names.join(', ');
+    return names.length === 0 ? 'Direct message' : names.join(', ');
   };
 
-  // The "primary" user used for avatar rendering. For solo/self DM this is
-  // the other party (or self for self-DM); for groups, the first non-self
-  // participant — group rendering shows a stacked indicator.
   const dmPrimaryUserId = (userIds: number[]): number | undefined => {
     if (!currentUser) return userIds[0];
     const others = userIds.filter((id) => id !== currentUser.user_id);
     return others.length === 0 ? currentUser.user_id : others[0];
   };
 
-  const sortedSubs = [...subscriptions].sort((a, b) =>
-    a.name.localeCompare(b.name)
-  );
+  // Unread channels first would reorder the list under the cursor as
+  // messages arrive; alphabetical keeps positions learnable.
+  const sortedSubs = [...subscriptions].sort((a, b) => a.name.localeCompare(b.name));
+  const inboxCount =
+    Object.values(unreadCounts.pms).reduce((a, b) => a + b, 0) +
+    subscriptions
+      .filter((s) => !s.is_muted)
+      .reduce((sum, s) => sum + getStreamUnreadCount(s.stream_id), 0);
+
+  const workspaceName = realmName || (() => {
+    try {
+      return new URL(serverUrl).hostname;
+    } catch {
+      return 'Zulip';
+    }
+  })();
+
+  const navItems: { id: SpecialView; label: string; icon: ReactNode; count: number; accent: boolean }[] = [
+    { id: 'inbox', label: 'Inbox', icon: <Inbox className="size-4" />, count: inboxCount, accent: false },
+    { id: 'mentions', label: 'Mentions', icon: <AtSign className="size-4" />, count: unreadMentionCount, accent: true },
+    { id: 'starred', label: 'Starred', icon: <Star className="size-4" />, count: 0, accent: false },
+  ];
+
+  const renderDmAvatar = (userIds: number[], size: string) => {
+    const primaryId = dmPrimaryUserId(userIds);
+    const user = primaryId !== undefined ? getUserById(primaryId) : undefined;
+    const others = currentUser ? userIds.filter((id) => id !== currentUser.user_id) : userIds;
+    const isGroup = others.length > 1;
+    const status = !isGroup && user ? getUserStatus(user.user_id) : null;
+    return (
+      <span className="relative shrink-0">
+        <Avatar className={`${size} rounded-[5px]`}>
+          <AvatarImage src={user ? resolveUrl(user.avatar_url) : undefined} alt="" />
+          <AvatarFallback className="rounded-[5px] text-[9px] font-semibold bg-surface-active">
+            {isGroup ? others.length : (user?.full_name || '?')[0]}
+          </AvatarFallback>
+        </Avatar>
+        {status && (
+          <span
+            className={`absolute -right-0.5 -bottom-0.5 size-2 rounded-full border-2 border-surface-sidebar ${PRESENCE_COLOR[status]}`}
+            aria-label={status}
+            role="img"
+          />
+        )}
+      </span>
+    );
+  };
 
   if (isCollapsed) {
     return (
-      <div className="w-16 bg-surface-secondary border-r border-surface-tertiary flex flex-col items-center py-2 h-full overflow-hidden">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onToggleCollapse}
-          className="text-text-secondary hover:text-text-primary hover:bg-surface-hover mb-2 shrink-0"
+      <TooltipProvider delayDuration={200}>
+        <nav
+          aria-label="Workspace"
+          className="w-14 bg-surface-sidebar border-r border-line flex flex-col items-center py-3 gap-1 h-full overflow-hidden"
         >
-          <Menu className="size-5" />
-        </Button>
-
-        <div className="flex-1 overflow-y-auto w-full flex flex-col items-center gap-1 px-1.5 scrollbar-none">
-          {/* DM Avatars */}
-          <TooltipProvider delayDuration={200}>
+          <button
+            onClick={onToggleCollapse}
+            aria-label="Expand sidebar"
+            className="size-8 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-surface-hover mb-2"
+          >
+            <PanelLeftOpen className="size-4" />
+          </button>
+          {navItems.map((item) => (
+            <Tooltip key={item.id}>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => onSelectSpecial(item.id)}
+                  aria-label={item.label}
+                  className={`relative size-8 rounded-md flex items-center justify-center ${
+                    activeSpecial === item.id
+                      ? 'bg-surface-active text-text-primary'
+                      : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                  }`}
+                >
+                  {item.icon}
+                  {item.count > 0 && (
+                    <span
+                      className={`absolute -top-0.5 -right-0.5 size-2 rounded-full ${item.accent ? 'bg-brand' : 'bg-text-muted'}`}
+                    />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">{item.label}</TooltipContent>
+            </Tooltip>
+          ))}
+          <div className="w-6 border-t border-line my-2" />
+          <div className="flex-1 overflow-y-auto w-full flex flex-col items-center gap-1 scrollbar-none">
             {dmConversations.slice(0, 8).map((dm) => {
               const key = dmKey(dm.userIds);
-              const primaryId = dmPrimaryUserId(dm.userIds);
-              const user = primaryId !== undefined ? getUserById(primaryId) : undefined;
-              if (!user) return null;
-              const others = currentUser
-                ? dm.userIds.filter((id) => id !== currentUser.user_id)
-                : dm.userIds;
-              const isGroup = others.length > 1;
-              // Status only meaningful for solo DMs.
-              const status = !isGroup ? getUserStatus(user.user_id) : null;
-              const pmUnread = unreadCounts.pms[key] || 0;
-              const label = dmLabel(dm.userIds);
+              const unread = unreadCounts.pms[key] || 0;
               return (
                 <Tooltip key={key}>
                   <TooltipTrigger asChild>
                     <button
                       onClick={() => onSelectDM(dm.userIds)}
-                      className={`relative rounded-full transition-all ${
-                        activeDmKey === key ? 'ring-2 ring-brand' : 'hover:opacity-80'
-                      }`}
+                      aria-label={dmLabel(dm.userIds)}
+                      className={`relative p-1 rounded-md ${activeDmKey === key ? 'bg-surface-active' : 'hover:bg-surface-hover'}`}
                     >
-                      <Avatar className="size-9">
-                        <AvatarImage src={resolveUrl(user.avatar_url)} alt={label} />
-                        <AvatarFallback className="text-xs">{(user.full_name || '?')[0]}</AvatarFallback>
-                      </Avatar>
-                      {isGroup ? (
-                        <div className="absolute bottom-0 right-0 size-3.5 rounded-full border-2 border-surface-secondary bg-surface-tertiary text-text-primary text-[8px] flex items-center justify-center font-bold leading-none">
-                          {others.length > 9 ? '9+' : others.length}
-                        </div>
-                      ) : (
-                        status && (
-                          <div className={`absolute bottom-0 right-0 size-2.5 rounded-full border-2 border-surface-secondary ${getStatusColor(status)}`} />
-                        )
-                      )}
-                      {pmUnread > 0 && (
-                        <div className="absolute -top-0.5 -right-0.5 size-4 rounded-full bg-red-500 text-white text-[9px] flex items-center justify-center font-bold">
-                          {pmUnread > 9 ? '9+' : pmUnread}
-                        </div>
-                      )}
+                      {renderDmAvatar(dm.userIds, 'size-6')}
+                      {unread > 0 && <span className="absolute top-0 right-0 size-2 rounded-full bg-brand" />}
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent side="right"><p>{label}</p></TooltipContent>
+                  <TooltipContent side="right">{dmLabel(dm.userIds)}</TooltipContent>
                 </Tooltip>
               );
             })}
-
-            {/* Divider */}
-            {dmConversations.length > 0 && sortedSubs.length > 0 && (
-              <div className="w-8 border-t border-surface-tertiary my-1" />
-            )}
-
-            {/* Channel Icons */}
-            {sortedSubs.map((sub) => {
-              const unread = getStreamUnreadCount(sub.stream_id);
-              const isMuted = sub.is_muted;
-              return (
-                <Tooltip key={sub.stream_id}>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() => toggleStream(sub.stream_id)}
-                      className={`relative size-9 rounded-lg flex items-center justify-center transition-all shrink-0 ${
-                        activeTopic?.streamId === sub.stream_id
-                          ? 'ring-2 ring-brand bg-surface-hover'
-                          : 'hover:bg-surface-hover'
-                      } ${isMuted ? 'opacity-40' : ''}`}
-                      style={{ backgroundColor: isMuted ? undefined : `${sub.color}20` }}
-                    >
-                      {sub.invite_only ? (
-                        <Lock className="size-4" style={{ color: sub.color }} />
-                      ) : (
-                        <Hash className="size-4" style={{ color: sub.color }} />
-                      )}
-                      {unread > 0 && !isMuted && (
-                        <div className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 rounded-full bg-red-500 text-white text-[9px] flex items-center justify-center font-bold px-0.5">
-                          {unread > 99 ? '99+' : unread}
-                        </div>
-                      )}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right"><p>{sub.name}{isMuted ? ' (muted)' : ''}</p></TooltipContent>
-                </Tooltip>
-              );
-            })}
-          </TooltipProvider>
-        </div>
-      </div>
+          </div>
+        </nav>
+      </TooltipProvider>
     );
   }
 
   return (
-    <div className="w-60 bg-surface-secondary border-r border-surface-tertiary flex flex-col h-full overflow-hidden">
-      {/* Header */}
-      <div className="h-12 border-b border-surface-tertiary px-4 flex items-center justify-between flex-shrink-0">
-        <span className="font-semibold text-text-primary">Zulip</span>
-        <Button
-          variant="ghost"
-          size="icon"
+    <nav
+      aria-label="Workspace"
+      className="w-[248px] shrink-0 bg-surface-sidebar border-r border-line flex flex-col h-full overflow-hidden"
+    >
+      {/* Workspace + collapse */}
+      <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+        <Logo size={22} className="shrink-0" />
+        <span className="font-semibold text-[13px] text-text-primary truncate">{workspaceName}</span>
+        <button
           onClick={onToggleCollapse}
-          className="text-text-secondary hover:text-text-primary hover:bg-surface-hover size-8"
+          aria-label="Collapse sidebar"
+          className="ml-auto size-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-surface-hover"
         >
-          <Menu className="size-4" />
-        </Button>
+          <PanelLeftClose className="size-4" />
+        </button>
       </div>
 
-      {/* View Toggle */}
-      <div className="px-2 py-3 flex-shrink-0">
-        <Tabs
-          value={activeView}
-          onValueChange={(v) => onViewChange(v as 'channels' | 'users')}
-          className="w-full"
+      {/* Search / jump */}
+      <div className="px-2 pb-3">
+        <button
+          onClick={onOpenSearch}
+          className="w-full h-[30px] flex items-center gap-2 px-2 rounded-md border border-line bg-surface-primary text-[13px] text-text-muted hover:text-text-secondary hover:border-text-muted/40"
         >
-          <TabsList className="w-full bg-surface-tertiary p-0.5">
-            <TabsTrigger
-              value="channels"
-              className="flex-1 data-[state=active]:bg-surface-hover data-[state=active]:text-text-primary text-text-secondary text-xs"
-            >
-              DMs & Channels
-            </TabsTrigger>
-            <TabsTrigger
-              value="users"
-              className="flex-1 data-[state=active]:bg-surface-hover data-[state=active]:text-text-primary text-text-secondary text-xs"
-            >
-              <Users className="size-3 mr-1" />
-              All Users
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+          <Search className="size-3.5" />
+          <span className="flex-1 text-left">Search or jump to…</span>
+          <kbd className="font-mono text-[10px] border border-line border-b-2 rounded px-1 text-text-muted">Ctrl K</kbd>
+        </button>
       </div>
 
-      {/* Scrollable content area */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {activeView === 'channels' ? (
-          <div className="px-2 pb-4">
-            {/* Direct Messages */}
-            {dmConversations.length > 0 && (
-              <div className="mb-4">
-                <h3 className="text-xs font-semibold text-text-secondary uppercase px-2 mb-2">
-                  Direct Messages
-                </h3>
-                <div className="space-y-0.5">
-                  {(showAllDMs ? dmConversations : dmConversations.slice(0, 5)).map((dm) => {
-                    const key = dmKey(dm.userIds);
-                    const primaryId = dmPrimaryUserId(dm.userIds);
-                    const user = primaryId !== undefined ? getUserById(primaryId) : undefined;
-                    if (!user) return null;
-                    const others = currentUser
-                      ? dm.userIds.filter((id) => id !== currentUser.user_id)
-                      : dm.userIds;
-                    const isGroup = others.length > 1;
-                    const status = !isGroup ? getUserStatus(user.user_id) : null;
-                    const pmUnread = unreadCounts.pms[key] || 0;
-                    const label = dmLabel(dm.userIds);
+      <div className="flex-1 overflow-y-auto min-h-0 px-2 pb-4 flex flex-col gap-4">
+        {/* Views */}
+        <div className="flex flex-col gap-px">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onSelectSpecial(item.id)}
+              className={rowClass(activeSpecial === item.id)}
+              aria-current={activeSpecial === item.id ? 'page' : undefined}
+            >
+              <span className="text-text-muted">{item.icon}</span>
+              <span>{item.label}</span>
+              <CountBadge count={item.count} accent={item.accent} />
+            </button>
+          ))}
+        </div>
 
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => onSelectDM(dm.userIds)}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-hover text-left ${
-                          activeDmKey === key ? 'bg-surface-hover' : ''
-                        }`}
-                      >
-                        <div className="relative">
-                          <Avatar className="size-8">
-                            <AvatarImage
-                              src={resolveUrl(user.avatar_url)}
-                              alt={label}
-                            />
-                            <AvatarFallback>{user.full_name[0]}</AvatarFallback>
-                          </Avatar>
-                          {isGroup ? (
-                            <div className="absolute bottom-0 right-0 size-4 rounded-full border-2 border-surface-secondary bg-surface-tertiary text-text-primary text-[9px] flex items-center justify-center font-bold leading-none">
-                              {others.length > 9 ? '9+' : others.length}
-                            </div>
-                          ) : (
-                            status && (
-                              <div className={`absolute bottom-0 right-0 size-3 rounded-full border-2 border-surface-secondary ${getStatusColor(status)}`} />
-                            )
-                          )}
-                        </div>
-                        <span className="flex-1 text-sm text-text-primary truncate">
-                          {label}
-                        </span>
-                        {pmUnread > 0 && (
-                          <Badge className="bg-red-500 text-white text-xs px-1.5 min-w-[20px] h-5 flex items-center justify-center">
-                            {pmUnread}
-                          </Badge>
-                        )}
-                      </button>
-                    );
-                  })}
-                  {dmConversations.length > 5 && (
-                    <button
-                      onClick={() => setShowAllDMs(!showAllDMs)}
-                      className="w-full text-xs text-text-muted hover:text-text-primary px-2 py-1 mt-1"
-                    >
-                      {showAllDMs ? 'Show less' : `Show ${dmConversations.length - 5} more`}
-                    </button>
-                  )}
-                </div>
-              </div>
+        {/* Direct messages */}
+        {dmConversations.length > 0 && (
+          <div className="flex flex-col gap-px">
+            <SectionLabel>Direct messages</SectionLabel>
+            {(showAllDMs ? dmConversations : dmConversations.slice(0, DM_LIMIT)).map((dm) => {
+              const key = dmKey(dm.userIds);
+              const unread = unreadCounts.pms[key] || 0;
+              return (
+                <button
+                  key={key}
+                  onClick={() => onSelectDM(dm.userIds)}
+                  className={rowClass(activeDmKey === key, unread > 0)}
+                  aria-current={activeDmKey === key ? 'page' : undefined}
+                >
+                  {renderDmAvatar(dm.userIds, 'size-4')}
+                  <span className="truncate">{dmLabel(dm.userIds)}</span>
+                  <CountBadge count={unread} accent />
+                </button>
+              );
+            })}
+            {dmConversations.length > DM_LIMIT && (
+              <button
+                onClick={() => setShowAllDMs(!showAllDMs)}
+                className="h-6 px-2 text-left text-[12px] text-text-muted hover:text-text-primary"
+              >
+                {showAllDMs ? 'Show fewer' : `Show ${dmConversations.length - DM_LIMIT} more`}
+              </button>
             )}
-
-            {/* Channels */}
-            <div>
-              <h3 className="text-xs font-semibold text-text-muted uppercase px-2 mb-2">
-                Channels
-              </h3>
-              <div className="space-y-0.5">
-                {sortedSubs.map((sub) => {
-                  const unread = getStreamUnreadCount(sub.stream_id);
-                  const isMuted = sub.is_muted;
-                  return (
-                    <div key={sub.stream_id} className={`group/stream ${isMuted ? 'opacity-50' : ''}`}>
-                      <div className="flex items-center">
-                        <button
-                          onClick={() => toggleStream(sub.stream_id)}
-                          className="flex-1 flex items-center gap-1 px-2 py-1.5 rounded hover:bg-surface-hover text-left"
-                        >
-                          {expandedStreams.has(sub.stream_id) ? (
-                            <ChevronDown className="size-3 text-text-muted" />
-                          ) : (
-                            <ChevronRight className="size-3 text-text-muted" />
-                          )}
-                          {sub.invite_only ? (
-                            <Lock className="size-4 text-text-muted" />
-                          ) : (
-                            <Hash className="size-4" style={{ color: sub.color }} />
-                          )}
-                          <span className="flex-1 text-sm text-text-primary truncate">
-                            {sub.name}
-                          </span>
-                          {unread > 0 && !isMuted && (
-                            <Badge className="bg-red-500 text-white text-xs px-1.5 min-w-[20px] h-5 flex items-center justify-center">
-                              {unread}
-                            </Badge>
-                          )}
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); muteStream(sub.stream_id, !isMuted); }}
-                          className="opacity-0 group-hover/stream:opacity-100 p-1 rounded hover:bg-surface-hover text-text-secondary hover:text-text-primary transition-opacity mr-1"
-                          title={isMuted ? 'Unmute' : 'Mute'}
-                        >
-                          {isMuted ? <VolumeX className="size-3.5" /> : <Volume2 className="size-3.5" />}
-                        </button>
-                      </div>
-
-                      {expandedStreams.has(sub.stream_id) && (() => {
-                        const allTopics = topics[sub.stream_id] || [];
-                        const filter = (topicFilters[sub.stream_id] || '').trim().toLowerCase();
-                        const visibleTopics = filter
-                          ? allTopics.filter((t) => t.name.toLowerCase().includes(filter))
-                          : allTopics;
-                        const showFilter = allTopics.length > TOPIC_FILTER_THRESHOLD;
-                        return (
-                        <div className="ml-6 space-y-0.5 mt-0.5">
-                          {showFilter && (
-                            <div className="relative mb-1">
-                              <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-text-muted pointer-events-none" />
-                              <input
-                                type="text"
-                                value={topicFilters[sub.stream_id] || ''}
-                                onChange={(e) => setTopicFilter(sub.stream_id, e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape') {
-                                    e.preventDefault();
-                                    setTopicFilter(sub.stream_id, '');
-                                  }
-                                }}
-                                placeholder={`Filter ${allTopics.length} topics...`}
-                                aria-label={`Filter topics in ${sub.name}`}
-                                className="w-full h-7 pl-7 pr-6 rounded bg-surface-tertiary border border-surface-tertiary text-text-primary placeholder:text-text-muted text-xs outline-none focus:border-brand"
-                              />
-                              {(topicFilters[sub.stream_id] || '') && (
-                                <button
-                                  onClick={() => setTopicFilter(sub.stream_id, '')}
-                                  aria-label="Clear topic filter"
-                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
-                                >
-                                  <X className="size-3" />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                          {showFilter && filter && (
-                            <div className="px-2 py-0.5 text-[10px] text-text-muted">
-                              {visibleTopics.length} of {allTopics.length}
-                            </div>
-                          )}
-                          {visibleTopics.length === 0 && filter && (
-                            <div className="px-2 py-1.5 text-xs text-text-muted italic">
-                              No topics match &ldquo;{topicFilters[sub.stream_id]}&rdquo;
-                            </div>
-                          )}
-                          {visibleTopics.map((topic) => {
-                            const topicUnread =
-                              unreadCounts.streams[
-                                `${sub.stream_id}:${topic.name}`
-                              ] || 0;
-                            return (
-                              <button
-                                key={topic.name}
-                                onClick={() =>
-                                  onSelectTopic(sub.stream_id, topic.name)
-                                }
-                                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-hover text-left ${
-                                  activeTopic?.streamId === sub.stream_id &&
-                                  activeTopic?.topicName === topic.name
-                                    ? 'bg-surface-hover'
-                                    : ''
-                                }`}
-                              >
-                                <span className="flex-1 text-sm text-text-secondary truncate">
-                                  {topic.name}
-                                </span>
-                                {topicUnread > 0 && (
-                                  <Badge className="bg-red-500 text-white text-xs px-1.5 min-w-[20px] h-5 flex items-center justify-center">
-                                    {topicUnread}
-                                  </Badge>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        );
-                      })()}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="px-2 pb-4">
-            <div className="space-y-0.5">
-              {otherUsers.map((user) => {
-                const status = getUserStatus(user.user_id);
-                // Solo DM key: [me, them] sorted.
-                const soloKey = currentUser
-                  ? dmKey([currentUser.user_id, user.user_id])
-                  : String(user.user_id);
-                const pmUnread = unreadCounts.pms[soloKey] || 0;
-                const targetIds = currentUser
-                  ? [currentUser.user_id, user.user_id]
-                  : [user.user_id];
-                return (
-                  <button
-                    key={user.user_id}
-                    onClick={() => onSelectDM(targetIds)}
-                    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-hover text-left ${
-                      activeDmKey === soloKey ? 'bg-surface-hover' : ''
-                    }`}
-                  >
-                    <div className="relative">
-                      <Avatar className="size-8">
-                        <AvatarImage
-                          src={resolveUrl(user.avatar_url)}
-                          alt={user.full_name}
-                        />
-                        <AvatarFallback>
-                          {user.full_name[0]}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div
-                        className={`absolute bottom-0 right-0 size-3 rounded-full border-2 border-surface-secondary ${getStatusColor(status)}`}
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-text-primary truncate">
-                        {user.full_name}
-                      </div>
-                    </div>
-                    {pmUnread > 0 && (
-                      <Badge className="bg-red-500 text-white text-xs px-1.5 min-w-[20px] h-5 flex items-center justify-center">
-                        {pmUnread}
-                      </Badge>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
           </div>
         )}
+
+        {/* Channels */}
+        <div className="flex flex-col gap-px">
+          <SectionLabel>Channels</SectionLabel>
+          {sortedSubs.map((sub) => {
+            const unread = sub.is_muted ? 0 : getStreamUnreadCount(sub.stream_id);
+            const expanded = expandedStreams.has(sub.stream_id);
+            const allTopics = topics[sub.stream_id] || [];
+            const filter = (topicFilters[sub.stream_id] || '').trim().toLowerCase();
+            const matching = filter
+              ? allTopics.filter((t) => t.name.toLowerCase().includes(filter))
+              : allTopics;
+            const limited = !filter && !showAllTopics.has(sub.stream_id);
+            // Keep the open topic visible even when it's past the limit.
+            const visibleTopics = limited
+              ? matching.filter(
+                  (t, i) =>
+                    i < TOPIC_LIMIT ||
+                    (activeTopic?.streamId === sub.stream_id && activeTopic.topicName === t.name)
+                )
+              : matching;
+            const hidden = matching.length - visibleTopics.length;
+            const showFilter = allTopics.length > TOPIC_FILTER_THRESHOLD;
+            return (
+              <div key={sub.stream_id} className={sub.is_muted ? 'opacity-60' : ''}>
+                <div className="relative group/stream">
+                  <button
+                    onClick={() => toggleStream(sub.stream_id)}
+                    className={rowClass(false, unread > 0)}
+                    aria-expanded={expanded}
+                  >
+                    {sub.invite_only ? (
+                      <Lock className="size-3.5 shrink-0" style={{ color: sub.color }} />
+                    ) : (
+                      <Hash className="size-3.5 shrink-0" style={{ color: sub.color }} />
+                    )}
+                    <span className="truncate">{sub.name}</span>
+                    <span className="ml-auto flex items-center gap-1">
+                      <span className="group-hover/stream:hidden">
+                        <CountBadge count={unread} />
+                      </span>
+                      {expanded ? (
+                        <ChevronDown className="size-3 text-text-muted" />
+                      ) : (
+                        <ChevronRight className="size-3 text-text-muted opacity-0 group-hover/stream:opacity-100" />
+                      )}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => muteStream(sub.stream_id, !sub.is_muted)}
+                    aria-label={sub.is_muted ? `Unmute ${sub.name}` : `Mute ${sub.name}`}
+                    title={sub.is_muted ? 'Unmute' : 'Mute'}
+                    className="absolute right-6 top-1/2 -translate-y-1/2 hidden group-hover/stream:flex size-5 items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-surface-active"
+                  >
+                    {sub.is_muted ? <VolumeX className="size-3" /> : <Volume2 className="size-3" />}
+                  </button>
+                </div>
+
+                {expanded && (
+                  <div className="flex flex-col gap-px">
+                    {showFilter && (
+                      <div className="relative my-1 ml-6 mr-1">
+                        <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-text-muted pointer-events-none" />
+                        <input
+                          type="text"
+                          value={topicFilters[sub.stream_id] || ''}
+                          onChange={(e) => setTopicFilter(sub.stream_id, e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setTopicFilter(sub.stream_id, '');
+                            }
+                          }}
+                          placeholder={`Filter ${allTopics.length} topics`}
+                          aria-label={`Filter topics in ${sub.name}`}
+                          className="w-full h-6 pl-6 pr-6 rounded border border-line bg-surface-primary text-text-primary placeholder:text-text-muted text-[12px] outline-none focus:border-brand"
+                        />
+                        {filter && (
+                          <button
+                            onClick={() => setTopicFilter(sub.stream_id, '')}
+                            aria-label="Clear topic filter"
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {matching.length === 0 && filter && (
+                      <div className="pl-8 pr-2 py-1 text-[12px] text-text-muted italic">
+                        No topics match &ldquo;{topicFilters[sub.stream_id]}&rdquo;
+                      </div>
+                    )}
+                    {visibleTopics.map((topic) => {
+                      const topicUnread = unreadCounts.streams[`${sub.stream_id}:${topic.name}`] || 0;
+                      const active =
+                        activeTopic?.streamId === sub.stream_id && activeTopic?.topicName === topic.name;
+                      return (
+                        <button
+                          key={topic.name}
+                          onClick={() => onSelectTopic(sub.stream_id, topic.name)}
+                          className={`${rowClass(active, topicUnread > 0 && !sub.is_muted)} pl-8 h-[26px]`}
+                          aria-current={active ? 'page' : undefined}
+                        >
+                          <span className="truncate">{topic.name}</span>
+                          {!sub.is_muted && <CountBadge count={topicUnread} />}
+                        </button>
+                      );
+                    })}
+                    {(hidden > 0 || (!limited && !filter && allTopics.length > TOPIC_LIMIT)) && (
+                      <button
+                        onClick={() =>
+                          setShowAllTopics((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(sub.stream_id)) next.delete(sub.stream_id);
+                            else next.add(sub.stream_id);
+                            return next;
+                          })
+                        }
+                        className="h-6 pl-8 text-left text-[12px] text-text-muted hover:text-text-primary"
+                      >
+                        {limited ? `Show all ${allTopics.length} topics` : 'Show fewer'}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
-    </div>
+
+      <div className="border-t border-line p-2">{footer}</div>
+    </nav>
   );
 }

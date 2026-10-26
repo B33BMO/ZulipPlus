@@ -2,12 +2,12 @@ import { useCallback, useRef, useState, useEffect, useImperativeHandle, forwardR
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
-import Link from '@tiptap/extension-link';
-import Underline from '@tiptap/extension-underline';
 import Image from '@tiptap/extension-image';
 import { Markdown } from 'tiptap-markdown';
-import { PlainText, ZulipQuote, insertQuoteNode, type ZulipQuoteAttrs } from './editor/extensions';
+import { TableRow, TableHeader, TableCell } from '@tiptap/extension-table';
+import { PlainText, ZulipQuote, ZulipTable, insertQuoteNode, type ZulipQuoteAttrs } from './editor/extensions';
 import { useZulip } from '../context/ZulipContext';
+import type { TypingTarget } from '../api/types';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import {
   Send,
@@ -44,21 +44,43 @@ interface RichComposerProps {
   onSendMessage: (content: string) => Promise<void>;
   onFileUpload?: (file: File) => Promise<string>;
   placeholder?: string;
-  // User IDs that should receive typing notifications. Null/empty means
-  // don't emit typing events (Zulip's typing API only supports DMs, not
-  // stream/topic conversations).
-  typingRecipients?: number[] | null;
+  // Who gets "is typing" notifications: the DM's other participants, or the
+  // open topic. Null means don't emit any.
+  typingTarget?: TypingTarget | null;
+}
+
+// Usable typing target, or null for an empty DM recipient list.
+function validTarget(t: TypingTarget | null): TypingTarget | null {
+  if (!t) return null;
+  if (t.type === 'direct' && t.to.length === 0) return null;
+  return t;
+}
+
+// Files on a paste. `files` covers both screenshots and files copied in a
+// file manager; `items` is the fallback for engines that only fill that.
+function clipboardFiles(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  if (data.files && data.files.length > 0) return Array.from(data.files);
+  const out: File[] = [];
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (file) out.push(file);
+  }
+  return out;
 }
 
 export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(function RichComposer({
   onSendMessage,
   onFileUpload,
   placeholder = 'Type a message...',
-  typingRecipients = null,
+  typingTarget = null,
 }, ref) {
-  const { users, currentUser, sendTyping } = useZulip();
+  const { users, currentUser, sendTyping, resolveUrl } = useZulip();
   const [sending, setSending] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  // Files finished / queued in the current upload run; null when idle.
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const uploading = uploadProgress !== null;
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showSpoilerInput, setShowSpoilerInput] = useState(false);
@@ -76,7 +98,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   const spoilerBtnRef = useRef<HTMLDivElement>(null);
   const spoilerRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
-  const fileUploadRef = useRef<((file: File) => Promise<void>) | null>(null);
+  const fileUploadRef = useRef<((files: File[]) => void) | null>(null);
 
   // Filter users for mention autocomplete
   const mentionUsers = useMemo(() => {
@@ -98,15 +120,23 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         // Replaced by PlainText below, which drops tiptap-markdown's HTML
         // entity escaping. Two text nodes in one schema is an error.
         text: false,
+        // StarterKit v3 bundles Link and Underline. Configure them here:
+        // registering them again separately duplicated both, and the
+        // bundled Link's default openOnClick won out.
+        link: {
+          openOnClick: false,
+          HTMLAttributes: { class: 'text-brand underline' },
+        },
       }),
       PlainText,
       ZulipQuote,
+      // Pasted tables (e.g. copied out of a message) stay tables and are
+      // sent as GFM pipe tables; see ZulipTable.
+      ZulipTable,
+      TableRow,
+      TableHeader,
+      TableCell,
       Placeholder.configure({ placeholder }),
-      Link.configure({
-        openOnClick: false,
-        HTMLAttributes: { class: 'text-brand underline' },
-      }),
-      Underline,
       Image.configure({
         inline: true,
         HTMLAttributes: { class: 'max-w-full max-h-48 rounded inline' },
@@ -120,7 +150,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     editorProps: {
       attributes: {
         class:
-          'prose prose-invert prose-sm max-w-none px-3 py-2 min-h-[44px] max-h-[200px] overflow-y-auto outline-none text-gray-200 text-sm',
+          'max-w-none px-3 pt-2.5 pb-1 min-h-[40px] max-h-[240px] overflow-y-auto outline-none text-text-primary text-[13px] leading-5',
       },
       handleKeyDown: (_view, event) => {
         // `isComposing` (and the legacy keyCode 229) mean an IME is still
@@ -136,19 +166,15 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         return false;
       },
       handlePaste: (_view, event) => {
-        const items = event.clipboardData?.items;
-        if (!items) return false;
-        for (const item of items) {
-          if (item.type.startsWith('image/') || item.type.startsWith('video/') || item.type.startsWith('application/')) {
-            const file = item.getAsFile();
-            if (file && fileUploadRef.current) {
-              event.preventDefault();
-              fileUploadRef.current(file);
-              return true;
-            }
-          }
-        }
-        return false;
+        // Every pasted file uploads (Zulip takes any type). This used to
+        // return after the first file, so pasting several files copied in
+        // Explorer only ever sent one. Plain-text pastes carry no files and
+        // fall through to the editor.
+        const files = clipboardFiles(event.clipboardData);
+        if (files.length === 0 || !fileUploadRef.current) return false;
+        event.preventDefault();
+        fileUploadRef.current(files);
+        return true;
       },
     },
     content: '',
@@ -169,43 +195,78 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   // Upload a file and insert into editor
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const handleFileUploadInternal = useCallback(async (file: File) => {
-    if (!onFileUpload || !editor) return;
-    setUploading(true);
+  // Uploads run one at a time through a single queue, so links land in the
+  // order the files were given, even across back-to-back pastes and drops.
+  // Firing them all at once (as drops used to) inserted links in whatever
+  // order the server answered, and the first finisher cleared the spinner
+  // while the rest were still going.
+  const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const uploadCountsRef = useRef({ done: 0, total: 0 });
+
+  const uploadFiles = useCallback((files: File[]) => {
+    if (!onFileUpload || !editor || files.length === 0) return;
+    const counts = uploadCountsRef.current;
+    counts.total += files.length;
+    setUploadProgress({ ...counts });
     setUploadError(null);
-    try {
-      const uri = await onFileUpload(file);
-      // Zulip auto-previews user_uploads links; use plain link syntax (no bang)
-      // so the server renders an inline preview instead of literal markdown.
-      editor.chain().focus().insertContent(`[${file.name}](${uri}) `).run();
-    } catch (err) {
-      console.error('Failed to upload file:', err);
-      setUploadError(`Failed to upload ${file.name}`);
-      setTimeout(() => setUploadError(null), 4000);
-    } finally {
-      setUploading(false);
-    }
+    uploadQueueRef.current = uploadQueueRef.current.then(async () => {
+      const failed: string[] = [];
+      for (const file of files) {
+        try {
+          const uri = await onFileUpload(file);
+          if (!editor.isDestroyed) {
+            // Inserted as a link-marked text node, not a markdown string:
+            // markdown gets parsed into a fresh paragraph that leaves the
+            // cursor before it, so each later upload landed ahead of the
+            // last. The serializer escapes the name on send. Plain link
+            // (no bang) — Zulip previews user_uploads links by itself.
+            editor
+              .chain()
+              .focus()
+              .insertContent([
+                { type: 'text', text: file.name, marks: [{ type: 'link', attrs: { href: uri } }] },
+                { type: 'text', text: ' ' },
+              ])
+              .run();
+          }
+        } catch (err) {
+          console.error('Failed to upload file:', err);
+          failed.push(file.name);
+        }
+        counts.done++;
+        setUploadProgress({ ...counts });
+      }
+      if (failed.length > 0) {
+        setUploadError(
+          failed.length === 1
+            ? `Failed to upload ${failed[0]}`
+            : `Failed to upload ${failed.length} files: ${failed.join(', ')}`
+        );
+        setTimeout(() => setUploadError(null), 6000);
+      }
+      // Another batch may have been queued meanwhile; only go idle once
+      // everything is through.
+      if (counts.done >= counts.total) {
+        uploadCountsRef.current = { done: 0, total: 0 };
+        setUploadProgress(null);
+      }
+    });
   }, [editor, onFileUpload]);
 
   // Keep ref in sync so paste handler always has the latest upload function
   useEffect(() => {
-    fileUploadRef.current = handleFileUploadInternal;
-  }, [handleFileUploadInternal]);
+    fileUploadRef.current = uploadFiles;
+  }, [uploadFiles]);
 
-  // Drag & drop file upload — validate file types like paste handler
+  // Drag & drop file upload. Every dropped file is uploaded: filtering on
+  // MIME type silently dropped text files, logs and anything the OS
+  // reports with an empty type.
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      for (const file of Array.from(files)) {
-        if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('application/')) {
-          handleFileUploadInternal(file);
-        }
-      }
-    }
-  }, [handleFileUploadInternal]);
+    uploadFiles(Array.from(e.dataTransfer.files));
+  }, [uploadFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -216,6 +277,9 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // dragleave also fires when moving onto a child element; only clear the
+    // highlight once the pointer has actually left the composer.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
     setDragOver(false);
   }, []);
 
@@ -267,13 +331,13 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
       // Send the typing-stop event so the peer's "X is typing" indicator
       // disappears immediately on send rather than after the 5s debounce.
       if (typingActiveRef.current) {
-        const to = typingRecipientsRef.current;
+        const target = validTarget(typingTargetRef.current);
         typingActiveRef.current = false;
         if (typingTimerRef.current) {
           clearTimeout(typingTimerRef.current);
           typingTimerRef.current = null;
         }
-        if (to && to.length > 0) sendTyping(to, 'stop').catch(() => {});
+        if (target) sendTyping(target, 'stop').catch(() => {});
       }
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -328,38 +392,41 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     };
   }, [editor]);
 
-  // Emit Zulip typing notifications while the user is typing in a DM.
-  // Pattern: send 'start' on first non-empty edit, debounce a 'stop' after
-  // 5s of no further edits (Zulip clients re-send 'start' on activity, so
-  // a peer's "X is typing" indicator won't expire on the other side as
-  // long as we keep sending). Stream/topic conversations don't get typing
-  // notifications — typingRecipients will be null.
+  // Emit Zulip typing notifications while the user types, in DMs and in
+  // topics. Pattern: send 'start' on the first non-empty edit, debounce a
+  // 'stop' after 5s of no further edits. Receivers expire an indicator ~15s
+  // after the last 'start', so during a long stretch of typing 'start' is
+  // re-sent every 10s, as Zulip's own clients do.
+  const TYPING_RESEND_MS = 10_000;
   const typingActiveRef = useRef(false);
+  const lastTypingStartRef = useRef(0);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const typingRecipientsRef = useRef<number[] | null>(typingRecipients);
-  useEffect(() => { typingRecipientsRef.current = typingRecipients; }, [typingRecipients]);
+  const typingTargetRef = useRef<TypingTarget | null>(typingTarget);
+  useEffect(() => { typingTargetRef.current = typingTarget; }, [typingTarget]);
 
   useEffect(() => {
     if (!editor) return;
     const stopTyping = () => {
-      const to = typingRecipientsRef.current;
+      const target = validTarget(typingTargetRef.current);
       typingActiveRef.current = false;
       if (typingTimerRef.current) {
         clearTimeout(typingTimerRef.current);
         typingTimerRef.current = null;
       }
-      if (to && to.length > 0) sendTyping(to, 'stop').catch(() => {});
+      if (target) sendTyping(target, 'stop').catch(() => {});
     };
     const onTyping = () => {
-      const to = typingRecipientsRef.current;
-      if (!to || to.length === 0) return;
+      const target = validTarget(typingTargetRef.current);
+      if (!target) return;
       if (editor.isEmpty) {
         if (typingActiveRef.current) stopTyping();
         return;
       }
-      if (!typingActiveRef.current) {
+      const now = Date.now();
+      if (!typingActiveRef.current || now - lastTypingStartRef.current > TYPING_RESEND_MS) {
         typingActiveRef.current = true;
-        sendTyping(to, 'start').catch(() => {});
+        lastTypingStartRef.current = now;
+        sendTyping(target, 'start').catch(() => {});
       }
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       typingTimerRef.current = setTimeout(stopTyping, 5000);
@@ -368,7 +435,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     return () => {
       editor.off('update', onTyping);
       // On unmount (or conversation switch — composer is keyed by it) tell
-      // the previous recipient set we've stopped typing.
+      // the previous conversation we've stopped typing.
       if (typingActiveRef.current) stopTyping();
     };
   }, [editor, sendTyping]);
@@ -425,14 +492,12 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
     return () => document.removeEventListener('keydown', handler, true);
   }, [mentionQuery, mentionUsers, mentionIndex, insertMention, editor]);
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     // Reset the input up-front so picking the same file twice in a row still
     // fires a change event.
     if (fileInputRef.current) fileInputRef.current.value = '';
-    for (const file of files) {
-      await handleFileUploadInternal(file);
-    }
+    uploadFiles(files);
   };
 
   const handleEmojiSelect = (emoji: string) => {
@@ -477,12 +542,12 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
   return (
     <div
       ref={composerRef}
-      className="px-4 pb-6 flex-shrink-0"
+      className="px-6 pb-4 flex-shrink-0"
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
     >
-      <div className={`bg-surface-composer rounded-lg transition-colors ${dragOver ? 'ring-2 ring-brand bg-brand/10' : ''}`}>
+      <div className={`bg-surface-composer border rounded-lg transition-colors ${dragOver ? 'border-brand ring-2 ring-brand/30' : 'border-line focus-within:border-text-muted/60'}`}>
         {/* Drag overlay */}
         {dragOver && (
           <div className="flex items-center justify-center py-4 text-sm text-brand font-medium">
@@ -490,6 +555,12 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
           </div>
         )}
         {/* Upload error banner */}
+        {uploadProgress && uploadProgress.total > 1 && (
+          <div className="flex items-center justify-center gap-1.5 py-1.5 text-xs text-text-secondary">
+            <Loader2 className="size-3 animate-spin" />
+            Uploading {Math.min(uploadProgress.done + 1, uploadProgress.total)} of {uploadProgress.total}…
+          </div>
+        )}
         {uploadError && (
           <div className="flex items-center justify-center py-1.5 text-xs text-red-400 bg-red-500/10 rounded-t-lg">
             {uploadError}
@@ -518,7 +589,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                   onMouseEnter={() => setMentionIndex(i)}
                 >
                   <Avatar className="size-6">
-                    <AvatarImage src={user.avatar_url} alt={user.full_name} />
+                    <AvatarImage src={resolveUrl(user.avatar_url)} alt={user.full_name} />
                     <AvatarFallback className="text-[10px]">{(user.full_name || '?')[0]}</AvatarFallback>
                   </Avatar>
                   <span className="truncate">{user.full_name}</span>
@@ -529,7 +600,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
         </div>
 
         {/* Toolbar */}
-        <div className="flex items-center justify-between px-3 pb-2">
+        <div className="flex items-center px-1.5 pb-1.5">
           <div className="flex items-center gap-0.5">
             <TooltipProvider>
               {/* File upload */}
@@ -538,14 +609,13 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="size-8 text-gray-400 hover:text-gray-200 hover:bg-surface-hover"
+                    className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={uploading}
                   >
                     {uploading ? (
-                      <Loader2 className="size-5 animate-spin" />
+                      <Loader2 className="size-4 animate-spin" />
                     ) : (
-                      <Paperclip className="size-5" />
+                      <Paperclip className="size-4" />
                     )}
                   </Button>
                 </TooltipTrigger>
@@ -559,15 +629,15 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                        showEmojiPicker ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
+                      className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                        showEmojiPicker ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                       }`}
                       onClick={() => {
                         setShowEmojiPicker(!showEmojiPicker);
                         setShowGifPicker(false);
                       }}
                     >
-                      <Smile className="size-5" />
+                      <Smile className="size-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent><p>Emoji</p></TooltipContent>
@@ -581,15 +651,15 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     <Button
                       variant="ghost"
                       size="icon"
-                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                        showGifPicker ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
+                      className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                        showGifPicker ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                       }`}
                       onClick={() => {
                         setShowGifPicker(!showGifPicker);
                         setShowEmojiPicker(false);
                       }}
                     >
-                      <ImageIcon className="size-5" />
+                      <ImageIcon className="size-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent><p>GIF</p></TooltipContent>
@@ -597,7 +667,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
               </div>
 
               {/* Divider */}
-              <div className="w-px h-6 bg-[#4e5058] mx-1" />
+              <div className="w-px h-4 bg-line mx-1" />
 
               {/* Formatting buttons */}
               <Tooltip>
@@ -606,8 +676,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleBold().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('bold') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('bold') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <Bold className="size-4" />
@@ -622,8 +692,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleItalic().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('italic') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('italic') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <Italic className="size-4" />
@@ -638,8 +708,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleStrike().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('strike') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('strike') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <Strikethrough className="size-4" />
@@ -654,8 +724,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleOrderedList().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('orderedList') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('orderedList') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <ListOrdered className="size-4" />
@@ -670,8 +740,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleBulletList().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('bulletList') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('bulletList') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <List className="size-4" />
@@ -686,8 +756,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     onClick={() => editor.chain().focus().toggleBlockquote().run()}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                      isActive('blockquote') ? 'text-white bg-surface-hover' : 'text-gray-400'
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                      isActive('blockquote') ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                     }`}
                   >
                     <Quote className="size-4" />
@@ -710,10 +780,10 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                     }}
                     variant="ghost"
                     size="icon"
-                    className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
+                    className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
                       isActive('code') || isActive('codeBlock')
-                        ? 'text-white bg-surface-hover'
-                        : 'text-gray-400'
+                        ? 'text-text-primary bg-surface-hover'
+                        : 'text-text-secondary'
                     }`}
                   >
                     <Code className="size-4" />
@@ -733,8 +803,8 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
                       }}
                       variant="ghost"
                       size="icon"
-                      className={`size-8 hover:text-gray-200 hover:bg-surface-hover ${
-                        showSpoilerInput ? 'text-gray-200 bg-surface-hover' : 'text-gray-400'
+                      className={`size-7 hover:text-text-primary hover:bg-surface-hover ${
+                        showSpoilerInput ? 'text-text-primary bg-surface-hover' : 'text-text-secondary'
                       }`}
                     >
                       <Eye className="size-4" />
@@ -789,11 +859,16 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(fu
             </TooltipProvider>
           </div>
 
+          <span className="ml-auto mr-2 hidden md:inline text-[11px] text-text-muted whitespace-nowrap">
+            <kbd className="font-mono text-[10px] border border-line border-b-2 rounded px-1">Enter</kbd> send ·{' '}
+            <kbd className="font-mono text-[10px] border border-line border-b-2 rounded px-1">Shift Enter</kbd> new line
+          </span>
           <Button
             onClick={handleSend}
             disabled={sending}
             size="icon"
-            className="size-8 bg-brand hover:bg-brand-hover disabled:bg-[#4e5058] disabled:text-gray-600"
+            aria-label="Send"
+            className="size-7 rounded-md bg-brand hover:bg-brand-hover text-white disabled:opacity-50"
           >
             {sending ? (
               <Loader2 className="size-4 animate-spin" />

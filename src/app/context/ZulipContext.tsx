@@ -7,7 +7,8 @@ import {
   useEffect,
   type ReactNode,
 } from 'react';
-import { ZulipApi } from '../api/zulipApi';
+import { ZulipApi, ZulipApiError, isAuthError } from '../api/zulipApi';
+import { htmlToText } from '../lib/zulipMarkdown';
 import { platform } from '../platform';
 import { loadCredentials, saveCredentials, clearCredentials } from '../api/credentialStore';
 import type {
@@ -23,7 +24,10 @@ import type {
   UpdateMessageFlagsEvent,
   DeleteMessageEvent,
   TypingEvent,
+  SubscriptionEvent,
+  UserStatusEvent,
   RegisterEventQueueResponse,
+  TypingTarget,
 } from '../api/types';
 
 // ── Presence helpers ──────────────────────────────────
@@ -47,6 +51,56 @@ export function dmKey(userIds: number[]): string {
   return userIds.slice().sort((a, b) => a - b).join(',');
 }
 
+// Union of two message lists by id, oldest first.
+function mergeMessages(a: ZulipMessage[], b: ZulipMessage[]): ZulipMessage[] {
+  const byId = new Map<number, ZulipMessage>();
+  for (const m of a) byId.set(m.id, m);
+  let added = false;
+  for (const m of b) {
+    if (!byId.has(m.id)) {
+      byId.set(m.id, m);
+      added = true;
+    }
+  }
+  if (!added) return a;
+  return Array.from(byId.values()).sort((x, y) => x.id - y.id);
+}
+
+// Which badge an unread message counts toward: a `${streamId}:${topic}` key
+// in `unreadCounts.streams`, or a dmKey in `unreadCounts.pms`.
+interface UnreadLoc {
+  kind: 'streams' | 'pms';
+  key: string;
+}
+
+// Zulip sends presence either as an `aggregated` roll-up or (in live events)
+// as one entry per client. Collapse either form into a single status.
+function aggregatePresence(
+  presence: Record<string, { status: string; timestamp: number } | undefined> | undefined
+): { status: UserStatus; timestamp: number } | null {
+  if (!presence) return null;
+  const agg = presence.aggregated;
+  if (agg) {
+    return {
+      status: agg.status === 'active' ? 'online' : agg.status === 'idle' ? 'idle' : 'offline',
+      timestamp: agg.timestamp,
+    };
+  }
+  let best: { status: UserStatus; timestamp: number } | null = null;
+  for (const entry of Object.values(presence)) {
+    if (!entry || typeof entry.timestamp !== 'number') continue;
+    const status: UserStatus = entry.status === 'active' ? 'online' : 'idle';
+    if (
+      !best ||
+      (status === 'online' && best.status !== 'online') ||
+      (status === best.status && entry.timestamp > best.timestamp)
+    ) {
+      best = { status, timestamp: entry.timestamp };
+    }
+  }
+  return best;
+}
+
 // ── Context shape ─────────────────────────────────────
 interface ZulipContextValue {
   api: ZulipApi | null;
@@ -64,14 +118,36 @@ interface ZulipContextValue {
   loading: boolean;
   loadingOlder: boolean;
   hasMoreMessages: boolean;
+  /** True when the view was opened at an older message and there's more below it. */
+  hasNewerMessages: boolean;
+  loadingNewer: boolean;
+  /** Message the current view was opened at (search result, link, notification). */
+  focusMessageId: number | null;
 
   // actions
   login: (server: string, email: string, apiKey: string) => Promise<ZulipUser>;
   logout: () => void;
-  loadTopics: (streamId: number) => Promise<void>;
-  loadMessages: (narrow: ZulipNarrow[]) => Promise<void>;
+  /** Fetches (and stores) a channel's topics, newest first. */
+  loadTopics: (streamId: number) => Promise<ZulipTopic[]>;
+  /**
+   * Leave the open conversation (Inbox and other non-message views). Without
+   * this, live messages for the conversation left behind would still count
+   * as "on screen" and never get an unread badge.
+   */
+  clearNarrow: () => void;
+  /** Opens a narrow at its newest message, or centred on `anchor` if given. */
+  loadMessages: (narrow: ZulipNarrow[], anchor?: number) => Promise<void>;
   /** Prepends older messages; resolves with how many were added. */
   loadOlderMessages: () => Promise<number>;
+  /** Appends the next page below an anchored view; resolves with how many were added. */
+  loadNewerMessages: () => Promise<number>;
+  /** Reloads the current narrow at its newest message. */
+  jumpToPresent: () => Promise<void>;
+  /**
+   * Registers what "open this message" means (notification clicks). The
+   * context knows the message; only the app knows how to navigate to it.
+   */
+  setMessageOpener: (opener: ((message: ZulipMessage) => void) | null) => void;
   sendMessage: (params: {
     type: 'stream' | 'direct';
     to: string | number | number[];
@@ -85,7 +161,7 @@ interface ZulipContextValue {
   deleteMessage: (messageId: number) => Promise<void>;
   getMessageRaw: (messageId: number) => Promise<string>;
   markMessagesAsRead: (messageIds: number[]) => Promise<void>;
-  sendTyping: (to: number[], op: 'start' | 'stop') => Promise<void>;
+  sendTyping: (target: TypingTarget, op: 'start' | 'stop') => Promise<void>;
   searchMessages: (query: string, signal?: AbortSignal) => Promise<ZulipMessage[]>;
   getUserStatus: (userId: number) => UserStatus;
   userStatusText: string;
@@ -98,6 +174,25 @@ interface ZulipContextValue {
     reaction_type?: string;
   }) => Promise<void>;
   muteStream: (streamId: number, mute: boolean) => Promise<void>;
+  /** False while invisible mode is on (Zulip's `presence_enabled` setting). */
+  presenceEnabled: boolean;
+  setInvisible: (invisible: boolean) => Promise<void>;
+  /** The realm's GIPHY key, or '' if the server doesn't configure one. */
+  giphyApiKey: string;
+  /** Organization display name ('' until /register answers). */
+  realmName: string;
+  /** Unread messages that mention you, for the Mentions badge. */
+  unreadMentionCount: number;
+  /** Recent unread messages across every conversation (Inbox previews). */
+  fetchUnreadMessages: () => Promise<ZulipMessage[]>;
+  /**
+   * Rename a whole topic (Zulip's "resolve" is a rename to a "✔ " prefix).
+   * `messageId` is any message in the topic.
+   */
+  renameTopic: (messageId: number, newTopic: string) => Promise<void>;
+  markAllAsRead: () => Promise<void>;
+  /** Set when cached credentials couldn't be used because the server was unreachable. */
+  autoLoginError: string | null;
   resolveUrl: (url: string) => string;
   fetchAuthenticatedUrl: (url: string) => Promise<string>;
 }
@@ -134,9 +229,30 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(true);
+  const [hasNewerMessages, setHasNewerMessages] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const [focusMessageId, setFocusMessageId] = useState<number | null>(null);
+  // Mirrors hasNewerMessages for the event loop: while the view doesn't reach
+  // the present, a live message can't be appended without leaving a gap.
+  const hasNewerRef = useRef(false);
+  useEffect(() => { hasNewerRef.current = hasNewerMessages; }, [hasNewerMessages]);
+  const messageOpenerRef = useRef<((message: ZulipMessage) => void) | null>(null);
+  const [autoLoginError, setAutoLoginError] = useState<string | null>(null);
+  const [presenceEnabled, setPresenceEnabled] = useState(true);
+  const [giphyApiKey, setGiphyApiKey] = useState('');
+  const [realmName, setRealmName] = useState('');
+  const [unreadMentionCount, setUnreadMentionCount] = useState(0);
   const currentNarrowRef = useRef<ZulipNarrow[]>([]);
 
-  const eventLoopRef = useRef<boolean>(false);
+  // Bumped on every login/logout. Each event loop captures the value it
+  // started with and exits as soon as it changes. A plain on/off flag let a
+  // loop still parked in a 90s long-poll survive logout → login: the next
+  // login flipped the flag back on and the old loop carried on with the
+  // previous account's credentials, double-counting every event.
+  const loopGenRef = useRef(0);
+  // The in-flight /events long-poll, so it can be abandoned and retried.
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const lastPollOkRef = useRef(Date.now());
   const queueIdRef = useRef<string | null>(null);
   const apiRef = useRef<ZulipApi | null>(null);
   const currentUserRef = useRef<ZulipUser | null>(null);
@@ -181,50 +297,147 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     serverUrlRef.current = serverUrl;
   }, [serverUrl]);
 
-  // ── Event loop ────────────────────────────────────────
-  const processInitialUnread = useCallback(
-    (reg: RegisterEventQueueResponse, myIdHint?: number) => {
-      if (!reg.unread_msgs) return;
-      const myId = myIdHint ?? currentUserRef.current?.user_id;
-      const streamCounts: Record<string, number> = {};
-      for (const s of reg.unread_msgs.streams) {
-        const key = `${s.stream_id}:${s.topic}`;
-        streamCounts[key] = s.unread_message_ids.length;
-      }
-      const pmCounts: Record<string, number> = {};
-      // Solo DMs: Zulip keys by sender_id; we key by sorted [me, sender].
-      for (const pm of reg.unread_msgs.pms) {
-        const ids = myId !== undefined ? [myId, pm.sender_id] : [pm.sender_id];
-        pmCounts[dmKey(ids)] = pm.unread_message_ids.length;
-      }
-      // Group DMs: Zulip already provides a sorted user_ids_string.
-      for (const h of reg.unread_msgs.huddles ?? []) {
-        pmCounts[h.user_ids_string] = h.unread_message_ids.length;
-      }
-      setUnreadCounts({ streams: streamCounts, pms: pmCounts });
+  // ── Unread tracking ───────────────────────────────────
+  // Every unread message id we know about → the badge it counts toward.
+  // `unreadCounts` is derived from this map rather than bumped up and down
+  // independently, so reading on another device, deletions and topic moves
+  // all land on the right badge instead of leaving stale counts behind.
+  const unreadRef = useRef<Map<number, UnreadLoc>>(new Map());
+  // Ids of messages that mention us. Only those still in unreadRef count, so
+  // every path that marks something read clears its mention for free.
+  const mentionIdsRef = useRef<Set<number>>(new Set());
+
+  const publishUnread = useCallback(() => {
+    const streams: Record<string, number> = {};
+    const pms: Record<string, number> = {};
+    for (const { kind, key } of unreadRef.current.values()) {
+      const bucket = kind === 'streams' ? streams : pms;
+      bucket[key] = (bucket[key] || 0) + 1;
+    }
+    setUnreadCounts({ streams, pms });
+    for (const id of mentionIdsRef.current) {
+      if (!unreadRef.current.has(id)) mentionIdsRef.current.delete(id);
+    }
+    setUnreadMentionCount(mentionIdsRef.current.size);
+  }, []);
+
+  const forgetUnread = useCallback(
+    (ids: Iterable<number>) => {
+      let changed = false;
+      for (const id of ids) changed = unreadRef.current.delete(id) || changed;
+      if (changed) publishUnread();
     },
-    []
+    [publishUnread]
+  );
+
+  // Topic names are case-insensitive on the server, so match keys that way.
+  const clearUnreadKey = useCallback(
+    (kind: UnreadLoc['kind'], key: string) => {
+      const target = key.toLowerCase();
+      let changed = false;
+      for (const [id, loc] of unreadRef.current) {
+        if (loc.kind === kind && loc.key.toLowerCase() === target) {
+          unreadRef.current.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) publishUnread();
+    },
+    [publishUnread]
+  );
+
+  // ── Event loop ────────────────────────────────────────
+  // Everything we read out of a /register response: unread state, our own
+  // status, the invisible-mode setting and the realm's GIPHY key.
+  const applyRegisterState = useCallback(
+    (reg: RegisterEventQueueResponse, myIdHint?: number) => {
+      const myId = myIdHint ?? currentUserRef.current?.user_id;
+      if (reg.unread_msgs) {
+        const map = new Map<number, UnreadLoc>();
+        for (const s of reg.unread_msgs.streams) {
+          const key = `${s.stream_id}:${s.topic}`;
+          for (const id of s.unread_message_ids) map.set(id, { kind: 'streams', key });
+        }
+        // Solo DMs: Zulip keys by sender_id; we key by sorted [me, sender].
+        for (const pm of reg.unread_msgs.pms) {
+          const key = dmKey(myId !== undefined ? [myId, pm.sender_id] : [pm.sender_id]);
+          for (const id of pm.unread_message_ids) map.set(id, { kind: 'pms', key });
+        }
+        // Group DMs: Zulip already provides a sorted user_ids_string.
+        for (const h of reg.unread_msgs.huddles ?? []) {
+          for (const id of h.unread_message_ids) {
+            map.set(id, { kind: 'pms', key: h.user_ids_string });
+          }
+        }
+        unreadRef.current = map;
+        mentionIdsRef.current = new Set(reg.unread_msgs.mentions ?? []);
+        publishUnread();
+      }
+      const mine = myId !== undefined ? reg.user_status?.[String(myId)] : undefined;
+      setUserStatusText(mine?.status_text ?? '');
+      setUserStatusEmoji(
+        mine?.emoji_name
+          ? {
+              name: mine.emoji_name,
+              code: mine.emoji_code ?? '',
+              type: mine.reaction_type ?? 'unicode_emoji',
+            }
+          : null
+      );
+      const enabled = reg.user_settings?.presence_enabled ?? reg.presence_enabled;
+      if (typeof enabled === 'boolean') setPresenceEnabled(enabled);
+      setGiphyApiKey(reg.giphy_api_key ?? '');
+      if (reg.realm_name) setRealmName(reg.realm_name);
+    },
+    [publishUnread]
   );
 
   const startEventLoop = useCallback(
     async (zApi: ZulipApi, myId?: number) => {
+      const gen = loopGenRef.current;
+      const alive = () => loopGenRef.current === gen;
       // Resolve a Zulip-relative URL to something fetchable in this runtime.
       const resolveUrlFn = (url: string) => platform.assetUrl(serverUrlRef.current, url);
 
       try {
-        let reg = await zApi.registerEventQueue();
+        // Keep trying to register: a server blip right at login used to
+        // leave the app with no event loop at all — no new messages, ever,
+        // until restart.
+        let reg: RegisterEventQueueResponse | null = null;
+        for (let attempt = 0; !reg; attempt++) {
+          try {
+            reg = await zApi.registerEventQueue();
+          } catch (err) {
+            if (!alive()) return;
+            console.warn('Event queue registration failed; retrying', err);
+            await new Promise((r) => setTimeout(r, Math.min(30_000, 2_000 * 2 ** attempt)));
+            if (!alive()) return;
+          }
+        }
+        if (!alive()) {
+          zApi.deleteEventQueue(reg.queue_id).catch(() => {});
+          return;
+        }
         queueIdRef.current = reg.queue_id;
         let lastEventId = reg.last_event_id;
-        processInitialUnread(reg, myId);
+        applyRegisterState(reg, myId);
 
-        eventLoopRef.current = true;
-
-        while (eventLoopRef.current) {
+        while (alive()) {
+          // Each poll gets a deadline. Zulip answers a long-poll within ~60s
+          // even when idle (heartbeat), so 90s of silence means the
+          // connection died under us (sleep, Wi-Fi change) without ever
+          // erroring — and without this the loop would wait on it forever.
+          const poll = new AbortController();
+          pollAbortRef.current = poll;
+          const deadline = setTimeout(() => poll.abort(), 90_000);
           try {
             const eventsRes = await zApi.getEvents(
               reg.queue_id,
-              lastEventId
+              lastEventId,
+              poll.signal
             );
+            lastPollOkRef.current = Date.now();
+            if (!alive()) break;
             for (const event of eventsRes.events) {
               try {
                 lastEventId = event.id;
@@ -306,7 +519,11 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                       }
                     });
                   }
-                  if (matchesNarrow) {
+                  // A view opened at an older message doesn't reach the
+                  // present yet; appending would leave a gap, so the message
+                  // is treated as off-screen (unread, notifiable) instead.
+                  const shownLive = matchesNarrow && !hasNewerRef.current;
+                  if (shownLive) {
                     setMessages((prev) => {
                       if (prev.some((m) => m.id === me.message.id)) return prev;
                       return [...prev, me.message];
@@ -315,24 +532,23 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   // Always update unread counts for messages not in current view.
                   // (The matched-narrow case is read-marked by MessageList.)
                   const msg = me.message;
-                  if (!matchesNarrow && msg.sender_id !== myId) {
+                  const alreadyRead = Array.isArray(me.flags) && me.flags.includes('read');
+                  if (!shownLive && msg.sender_id !== myId && !alreadyRead) {
+                    if (me.flags?.some((f) => f === 'mentioned' || f === 'wildcard_mentioned')) {
+                      mentionIdsRef.current.add(msg.id);
+                    }
                     if (msg.type === 'stream' && typeof msg.stream_id === 'number') {
-                      setUnreadCounts((prev) => {
-                        const key = `${msg.stream_id}:${msg.subject}`;
-                        return {
-                          ...prev,
-                          streams: { ...prev.streams, [key]: (prev.streams[key] || 0) + 1 },
-                        };
+                      unreadRef.current.set(msg.id, {
+                        kind: 'streams',
+                        key: `${msg.stream_id}:${msg.subject}`,
                       });
+                      publishUnread();
                     } else if (msg.type === 'private' && Array.isArray(msg.display_recipient)) {
                       const ids = (msg.display_recipient as { id: number }[]).map((r) => r.id);
                       // Ensure self is represented even if Zulip omits us.
                       if (myId !== undefined && !ids.includes(myId)) ids.push(myId);
-                      const key = dmKey(ids);
-                      setUnreadCounts((prev) => ({
-                        ...prev,
-                        pms: { ...prev.pms, [key]: (prev.pms[key] || 0) + 1 },
-                      }));
+                      unreadRef.current.set(msg.id, { kind: 'pms', key: dmKey(ids) });
+                      publishUnread();
                     }
                   }
                   // Desktop notification for DMs and @-mentions from other users.
@@ -350,17 +566,21 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                     const focused = typeof document !== 'undefined'
                       && document.hasFocus()
                       && document.visibilityState === 'visible';
-                    const userIsLookingAtThis = focused && matchesNarrow;
+                    const userIsLookingAtThis = focused && shownLive;
                     if (!isFromMe && (isDM || isMentioned) && !userIsLookingAtThis) {
-                      const div = document.createElement('div');
-                      div.innerHTML = msg.content;
-                      const text = (div.textContent || div.innerText || '').slice(0, 200) || '(sent an attachment)';
+                      const text = htmlToText(msg.content).slice(0, 200) || '(sent an attachment)';
                       const title = isDM
                         ? msg.sender_full_name
                         : `${msg.sender_full_name} (#${typeof msg.display_recipient === 'string' ? msg.display_recipient : ''} > ${msg.subject})`;
                       const icon = resolveUrlFn(msg.avatar_url);
                       platform
-                        .notify({ title, body: text, icon, tag: `zulip-${msg.id}` })
+                        .notify({
+                          title,
+                          body: text,
+                          icon,
+                          tag: `zulip-${msg.id}`,
+                          onClick: () => messageOpenerRef.current?.(msg),
+                        })
                         .catch(() => {});
                     }
                   }
@@ -417,6 +637,20 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   );
                   const isMove =
                     typeof ue.subject === 'string' || typeof ue.new_stream_id === 'number';
+                  if (isMove) {
+                    // Re-home any unread moved messages onto their new topic's badge.
+                    let changed = false;
+                    for (const id of movedIds) {
+                      const loc = unreadRef.current.get(id);
+                      if (!loc || loc.kind !== 'streams') continue;
+                      const sep = loc.key.indexOf(':');
+                      const sid = ue.new_stream_id ?? Number(loc.key.slice(0, sep));
+                      const topic = ue.subject ?? loc.key.slice(sep + 1);
+                      unreadRef.current.set(id, { kind: 'streams', key: `${sid}:${topic}` });
+                      changed = true;
+                    }
+                    if (changed) publishUnread();
+                  }
                   setMessages((prev) => {
                     const next = prev.map((m) => {
                       const edited = m.id === ue.message_id && isContentEdit;
@@ -425,9 +659,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                       const out = { ...m };
                       if (edited && newContent !== undefined) {
                         out.content = newContent;
-                        // Only a content edit gets the "(edited)" marker —
-                        // a topic move isn't an edit of the message body.
-                        out.last_edit_timestamp = ue.edit_timestamp;
+                        // Only a real content edit gets the "(edited)"
+                        // marker — not a topic move, and not the server
+                        // re-rendering to attach a link preview.
+                        if (!ue.rendering_only) out.last_edit_timestamp = ue.edit_timestamp;
                       }
                       if (moved) {
                         if (typeof ue.subject === 'string') out.subject = ue.subject;
@@ -468,9 +703,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                 }
                 case 'delete_message': {
                   const de = event as DeleteMessageEvent;
-                  setMessages((prev) =>
-                    prev.filter((m) => !de.message_ids.includes(m.id))
+                  const deleted = new Set(
+                    de.message_ids ?? (typeof de.message_id === 'number' ? [de.message_id] : [])
                   );
+                  if (deleted.size === 0) break;
+                  setMessages((prev) => prev.filter((m) => !deleted.has(m.id)));
+                  forgetUnread(deleted);
                   break;
                 }
                 case 'reaction': {
@@ -518,19 +756,14 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   break;
                 }
                 case 'presence': {
+                  // Live presence events carry one entry per client and
+                  // usually no `aggregated` key — only reading `aggregated`
+                  // meant these were all dropped and presence only moved
+                  // on the 60s ping.
                   const pe = event as PresenceEvent;
-                  const aggregated = pe.presence?.aggregated as
-                    | { status: 'active' | 'idle'; timestamp: number }
-                    | undefined;
-                  if (aggregated) {
-                    setPresence((prev) => ({
-                      ...prev,
-                      [pe.user_id]: {
-                        status:
-                          aggregated.status === 'active' ? 'online' : 'idle',
-                        timestamp: aggregated.timestamp,
-                      },
-                    }));
+                  const next = aggregatePresence(pe.presence);
+                  if (next) {
+                    setPresence((prev) => ({ ...prev, [pe.user_id]: next }));
                   }
                   break;
                 }
@@ -564,12 +797,19 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
 
                   if (te.op === 'start') {
                     setTypingUsers((prev) => {
+                      // A repeated 'start' (clients re-send while typing)
+                      // refreshes the timestamp so the 15s expiry below
+                      // doesn't hide someone who's still typing.
                       if (
                         prev.some(
                           (t) => t.userId === te.sender.user_id && t.conversationKey === ck
                         )
                       ) {
-                        return prev;
+                        return prev.map((t) =>
+                          t.userId === te.sender.user_id && t.conversationKey === ck
+                            ? { ...t, timestamp: Date.now() }
+                            : t
+                        );
                       }
                       return [
                         ...prev,
@@ -595,6 +835,33 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   // event type but previously dropped it on the floor, so
                   // reading a thread on mobile left it bold here.
                   const fe = event as UpdateMessageFlagsEvent;
+                  if (fe.flag === 'read') {
+                    if (fe.op === 'add' && fe.all) {
+                      unreadRef.current.clear();
+                      publishUnread();
+                    } else if (fe.op === 'add') {
+                      forgetUnread(fe.messages ?? []);
+                    } else {
+                      // Marked unread (here or elsewhere): put the badge back.
+                      const myFlagsId = currentUserRef.current?.user_id;
+                      for (const id of fe.messages ?? []) {
+                        const d = fe.message_details?.[String(id)];
+                        if (!d) continue;
+                        if (d.mentioned) mentionIdsRef.current.add(id);
+                        if (d.type === 'stream' && typeof d.stream_id === 'number') {
+                          unreadRef.current.set(id, {
+                            kind: 'streams',
+                            key: `${d.stream_id}:${d.topic ?? ''}`,
+                          });
+                        } else if (d.type === 'private') {
+                          const ids = (d.user_ids ?? []).slice();
+                          if (myFlagsId !== undefined && !ids.includes(myFlagsId)) ids.push(myFlagsId);
+                          unreadRef.current.set(id, { kind: 'pms', key: dmKey(ids) });
+                        }
+                      }
+                      publishUnread();
+                    }
+                  }
                   if (!Array.isArray(fe.messages) || fe.messages.length === 0) break;
                   const flagIds = new Set(fe.messages);
                   setMessages((prev) =>
@@ -609,9 +876,33 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                   break;
                 }
                 case 'subscription': {
-                  // Reload subscriptions on changes
-                  const subsRes = await zApi.getSubscriptions();
-                  setSubscriptions(subsRes.subscriptions);
+                  // Reload subscriptions on changes. peer_add/peer_remove are
+                  // other people joining/leaving and don't change our list.
+                  const op = (event as SubscriptionEvent).op;
+                  if (op === 'peer_add' || op === 'peer_remove') break;
+                  // Not awaited: a slow refetch mustn't stall event delivery.
+                  zApi
+                    .getSubscriptions()
+                    .then((subsRes) => { if (alive()) setSubscriptions(subsRes.subscriptions); })
+                    .catch((err) => console.warn('Subscription refresh failed', err));
+                  break;
+                }
+                case 'user_status': {
+                  // Our own status changed (possibly from another device).
+                  const se = event as UserStatusEvent;
+                  if (se.user_id !== currentUserRef.current?.user_id) break;
+                  if (typeof se.status_text === 'string') setUserStatusText(se.status_text);
+                  if (typeof se.emoji_name === 'string') {
+                    setUserStatusEmoji(
+                      se.emoji_name
+                        ? {
+                            name: se.emoji_name,
+                            code: se.emoji_code ?? '',
+                            type: se.reaction_type ?? 'unicode_emoji',
+                          }
+                        : null
+                    );
+                  }
                   break;
                 }
                 }
@@ -621,37 +912,80 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
               }
             }
           } catch (err: unknown) {
-            if (!eventLoopRef.current) break;
+            if (!alive()) break;
+            // Deadline hit or deliberately kicked: poll again straight away.
+            if (poll.signal.aborted) continue;
             // If the queue expired (e.g. after a long sleep / network blip),
             // re-register and continue. Otherwise back off and retry.
             const msg = err instanceof Error ? err.message : String(err ?? '');
             const isBadQueue =
-              /BAD_EVENT_QUEUE_ID/i.test(msg) ||
+              (err instanceof ZulipApiError && err.code === 'BAD_EVENT_QUEUE_ID') ||
               /Bad event queue id/i.test(msg) ||
               /queue.*not.*found/i.test(msg);
             if (isBadQueue) {
               try {
                 reg = await zApi.registerEventQueue();
+                if (!alive()) {
+                  zApi.deleteEventQueue(reg.queue_id).catch(() => {});
+                  break;
+                }
                 queueIdRef.current = reg.queue_id;
                 lastEventId = reg.last_event_id;
                 // Prefer the live ref over the captured `myId` argument:
                 // on a re-register after a network blip the original arg may
                 // be stale (e.g. undefined if login raced the first call).
-                processInitialUnread(reg, currentUserRef.current?.user_id ?? myId);
+                applyRegisterState(reg, currentUserRef.current?.user_id ?? myId);
+                // Anything sent while the old queue was dead never reached
+                // us as an event, so the open conversation would silently
+                // be missing those messages. Pull them in.
+                const narrow = currentNarrowRef.current;
+                const navToken = loadNavTokenRef.current;
+                if (narrow.length > 0 && !hasNewerRef.current) {
+                  zApi
+                    .getMessages({ narrow, num_before: 50, num_after: 0 })
+                    .then((res) => {
+                      if (!alive() || loadNavTokenRef.current !== navToken) return;
+                      setMessages((prev) => mergeMessages(prev, res.messages));
+                    })
+                    .catch(() => {});
+                }
                 continue;
               } catch (reRegErr) {
                 console.error('Failed to re-register event queue', reRegErr);
               }
             }
             await new Promise((r) => setTimeout(r, 5000));
+          } finally {
+            clearTimeout(deadline);
           }
         }
       } catch (err) {
         console.error('Failed to start event queue:', err);
       }
     },
-    [processInitialUnread]
+    [applyRegisterState, publishUnread, forgetUnread]
   );
+
+  // Abandon the current long-poll and immediately start a fresh one. Used
+  // when there's reason to think the connection went stale quietly.
+  const kickEventLoop = useCallback(() => {
+    pollAbortRef.current?.abort();
+  }, []);
+
+  // Coming back online, or back to the window after the poll has been quiet
+  // longer than its own deadline (the machine slept, timers didn't run):
+  // reconnect now instead of waiting out a dead socket.
+  useEffect(() => {
+    const onFocus = () => {
+      if (Date.now() - lastPollOkRef.current > 100_000) kickEventLoop();
+    };
+    window.addEventListener('online', kickEventLoop);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('online', kickEventLoop);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [kickEventLoop]);
 
   // Clean up typing indicators that are stale (>15s)
   useEffect(() => {
@@ -747,12 +1081,8 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       const presMap: PresenceMap = {};
       for (const [email, data] of Object.entries(presenceRes.presences)) {
         const user = usersRes.members.find((u) => u.email === email);
-        if (user && data.aggregated) {
-          presMap[user.user_id] = {
-            status: data.aggregated.status === 'active' ? 'online' : data.aggregated.status === 'idle' ? 'idle' : 'offline',
-            timestamp: data.aggregated.timestamp,
-          };
-        }
+        const p = aggregatePresence(data);
+        if (user && p) presMap[user.user_id] = p;
       }
       setPresence(presMap);
 
@@ -782,7 +1112,10 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         console.warn('Failed to persist credentials:', err);
       });
 
-      // Start event loop in background
+      // Start event loop in background. Bumping the generation first retires
+      // any loop left over from a previous session.
+      loopGenRef.current++;
+      setAutoLoginError(null);
       startEventLoop(zApi, profile.user_id);
 
       // Start periodic presence ping — this both reports our own activity AND
@@ -802,13 +1135,8 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
               const next = { ...prev };
               for (const [email, data] of Object.entries(res.presences)) {
                 const uid = byEmail.get(email);
-                if (uid && data.aggregated) {
-                  next[uid] = {
-                    status: data.aggregated.status === 'active' ? 'online'
-                      : data.aggregated.status === 'idle' ? 'idle' : 'offline',
-                    timestamp: data.aggregated.timestamp,
-                  };
-                }
+                const p = aggregatePresence(data);
+                if (uid && p) next[uid] = p;
               }
               return next;
             });
@@ -843,7 +1171,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(() => {
-    eventLoopRef.current = false;
+    loopGenRef.current++;
     if (presencePingRef.current) {
       clearInterval(presencePingRef.current);
       presencePingRef.current = null;
@@ -871,13 +1199,22 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     setSubscriptions([]);
     setTopics({});
     setMessages([]);
+    setHasNewerMessages(false);
+    hasNewerRef.current = false;
+    setFocusMessageId(null);
     setPresence({});
     setTypingUsers([]);
+    unreadRef.current.clear();
+    mentionIdsRef.current.clear();
+    setUnreadMentionCount(0);
+    setRealmName('');
     setUnreadCounts({ streams: {}, pms: {} });
     setDmConversations([]);
     setRealmEmoji({});
     setUserStatusText('');
     setUserStatusEmoji(null);
+    setPresenceEnabled(true);
+    setGiphyApiKey('');
     currentNarrowRef.current = [];
     queueIdRef.current = null;
   }, []);
@@ -893,25 +1230,83 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     loadCredentials()
       .then((cached) => {
         if (!cached) return;
-        return login(cached.server, cached.email, cached.apiKey).catch(() => {
-          // Credentials expired or invalid — wipe them.
-          return clearCredentials();
+        return login(cached.server, cached.email, cached.apiKey).catch((err) => {
+          // Only a rejected key means the saved credentials are bad. A
+          // server that's down or a laptop that woke up offline used to
+          // wipe them too, forcing a trip to Zulip settings for the key.
+          if (isAuthError(err)) {
+            setAutoLoginError('Your saved API key was rejected. Sign in again.');
+            return clearCredentials();
+          }
+          setAutoLoginError(
+            `Couldn't reach ${cached.server}${err instanceof Error ? ` (${err.message})` : ''}`
+          );
         });
       })
       .catch(() => { /* swallow */ });
   }, [login]);
 
   const loadTopics = useCallback(
-    async (streamId: number) => {
-      if (!api) return;
+    async (streamId: number): Promise<ZulipTopic[]> => {
+      if (!api) return [];
       const res = await api.getTopics(streamId);
       setTopics((prev) => ({ ...prev, [streamId]: res.topics }));
+      return res.topics;
     },
     [api]
   );
 
+  const clearNarrow = useCallback(() => {
+    loadNavTokenRef.current++;
+    currentNarrowRef.current = [];
+    hasNewerRef.current = false;
+    setHasNewerMessages(false);
+    setFocusMessageId(null);
+    setMessages([]);
+    setLoading(false);
+  }, []);
+
+  // Clear the badge for the conversation a narrow points at. Opening a
+  // conversation counts as reading it, even past the first page we fetched.
+  const clearNarrowUnread = useCallback(
+    (narrow: ZulipNarrow[]) => {
+      const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
+      const streamNarrow = narrow.find((n) => n.operator === 'stream' || n.operator === 'channel');
+      const topicNarrow = narrow.find((n) => n.operator === 'topic' || n.operator === 'subject');
+
+      if (dmNarrow) {
+        // Operand is comma-separated emails of OTHER participants. Build the
+        // sorted user-id set (incl. self).
+        const others = String(dmNarrow.operand)
+          .split(',')
+          .map((e) => e.trim().toLowerCase())
+          .filter(Boolean);
+        const myId = currentUserRef.current?.user_id;
+        const ids: number[] = [];
+        if (myId !== undefined) ids.push(myId);
+        for (const email of others) {
+          const u = users.find((x) => x.email.toLowerCase() === email);
+          if (u && !ids.includes(u.user_id)) ids.push(u.user_id);
+        }
+        if (ids.length > 0) clearUnreadKey('pms', dmKey(ids));
+      }
+      if (streamNarrow && topicNarrow) {
+        const operand = streamNarrow.operand;
+        const streamId =
+          typeof operand === 'number'
+            ? operand
+            : subscriptions.find((s) => s.name === operand || s.stream_id === Number(operand))
+                ?.stream_id;
+        if (streamId !== undefined) {
+          clearUnreadKey('streams', `${streamId}:${String(topicNarrow.operand)}`);
+        }
+      }
+    },
+    [users, subscriptions, clearUnreadKey]
+  );
+
   const loadMessages = useCallback(
-    async (narrow: ZulipNarrow[]) => {
+    async (narrow: ZulipNarrow[], anchor?: number) => {
       if (!api) return;
       const myToken = ++loadNavTokenRef.current;
       setLoading(true);
@@ -919,10 +1314,21 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       // Clear immediately so the previous narrow's messages don't flash.
       setMessages([]);
       setHasMoreMessages(true);
+      setHasNewerMessages(false);
+      hasNewerRef.current = false;
+      setFocusMessageId(null);
       try {
-        const res = await api.getMessages({ narrow, num_before: 50, num_after: 0 });
+        const res = await api.getMessages(
+          anchor === undefined
+            ? { narrow, num_before: 50, num_after: 0 }
+            : { narrow, anchor, num_before: 25, num_after: 25 }
+        );
         // Bail if a newer load (or logout) has started.
         if (loadNavTokenRef.current !== myToken) return;
+        const reachesPresent = anchor === undefined || res.found_newest;
+        hasNewerRef.current = !reachesPresent;
+        setHasNewerMessages(!reachesPresent);
+        setFocusMessageId(anchor !== undefined && res.found_anchor ? anchor : null);
 
         // Mark all loaded messages as read, and stamp the `read` flag onto our
         // local copies. Without the local stamp the flags never change, so
@@ -946,59 +1352,12 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         }
         setHasMoreMessages(!res.found_oldest);
 
-        // Clear local unread counts for this narrow
-        const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
-        const streamNarrow = narrow.find((n) => n.operator === 'stream' || n.operator === 'channel');
-        const topicNarrow = narrow.find((n) => n.operator === 'topic' || n.operator === 'subject');
-
-        if (dmNarrow) {
-          // Operand is comma-separated emails of OTHER participants. Build the
-          // sorted user-id set (incl. self) and clear that conversation's badge.
-          const others = String(dmNarrow.operand)
-            .split(',')
-            .map((e) => e.trim().toLowerCase())
-            .filter(Boolean);
-          const myId = currentUserRef.current?.user_id;
-          const ids: number[] = [];
-          if (myId !== undefined) ids.push(myId);
-          for (const email of others) {
-            const u = users.find((x) => x.email.toLowerCase() === email);
-            if (u && !ids.includes(u.user_id)) ids.push(u.user_id);
-          }
-          if (ids.length > 0) {
-            const key = dmKey(ids);
-            setUnreadCounts((prev) => {
-              const pms = { ...prev.pms };
-              delete pms[key];
-              return { ...prev, pms };
-            });
-          }
-        }
-        if (streamNarrow && topicNarrow) {
-          const operand = streamNarrow.operand;
-          const topicName = String(topicNarrow.operand);
-          let streamId: number | undefined;
-          if (typeof operand === 'number') {
-            streamId = operand;
-          } else {
-            const sub = subscriptions.find(
-              (s) => s.name === operand || s.stream_id === Number(operand)
-            );
-            streamId = sub?.stream_id;
-          }
-          if (streamId !== undefined) {
-            setUnreadCounts((prev) => {
-              const streams = { ...prev.streams };
-              delete streams[`${streamId}:${topicName}`];
-              return { ...prev, streams };
-            });
-          }
-        }
+        clearNarrowUnread(narrow);
       } finally {
         if (loadNavTokenRef.current === myToken) setLoading(false);
       }
     },
-    [api, users, subscriptions]
+    [api, clearNarrowUnread]
   );
 
   // Read the oldest-message id from a ref instead of putting `messages` in
@@ -1037,6 +1396,45 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [api, loadingOlder, hasMoreMessages]
   );
 
+  const loadNewerMessages = useCallback(
+    async (): Promise<number> => {
+      const cur = messagesRef.current;
+      if (!api || loadingNewer || !hasNewerMessages || cur.length === 0) return 0;
+      const myToken = loadNavTokenRef.current;
+      setLoadingNewer(true);
+      try {
+        const newestId = cur[cur.length - 1].id;
+        const res = await api.getMessages({
+          narrow: currentNarrowRef.current,
+          anchor: newestId,
+          num_before: 0,
+          num_after: 50,
+        });
+        if (loadNavTokenRef.current !== myToken) return 0;
+        const newer = res.messages.filter((m) => m.id > newestId);
+        if (newer.length > 0) setMessages((prev) => mergeMessages(prev, newer));
+        hasNewerRef.current = !res.found_newest;
+        setHasNewerMessages(!res.found_newest);
+        return newer.length;
+      } finally {
+        if (loadNavTokenRef.current === myToken) setLoadingNewer(false);
+      }
+    },
+    [api, loadingNewer, hasNewerMessages]
+  );
+
+  const jumpToPresent = useCallback(
+    () => loadMessages(currentNarrowRef.current),
+    [loadMessages]
+  );
+
+  const setMessageOpener = useCallback(
+    (opener: ((message: ZulipMessage) => void) | null) => {
+      messageOpenerRef.current = opener;
+    },
+    []
+  );
+
   const sendMessage = useCallback(
     async (params: {
       type: 'stream' | 'direct';
@@ -1045,9 +1443,31 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       content: string;
     }) => {
       if (!api) return;
-      await api.sendMessage(params);
+      const res = await api.sendMessage(params);
+      // Safety net: our own message should arrive back over the event loop
+      // within a moment. If it hasn't, the loop is probably stuck on a dead
+      // connection — fetch the message directly so the sender sees it, and
+      // kick the loop so everything after it flows again.
+      const narrow = currentNarrowRef.current;
+      const navToken = loadNavTokenRef.current;
+      const sentId = res.id;
+      if (typeof sentId !== 'number' || narrow.length === 0) return;
+      window.setTimeout(() => {
+        if (loadNavTokenRef.current !== navToken || hasNewerRef.current) return;
+        if (messagesRef.current.some((m) => m.id === sentId)) return;
+        console.warn(`Sent message ${sentId} never arrived via events; fetching it and reconnecting`);
+        kickEventLoop();
+        api
+          .getMessages({ narrow, anchor: sentId, num_before: 0, num_after: 0 })
+          .then((r) => {
+            if (loadNavTokenRef.current !== navToken) return;
+            const found = r.messages.filter((m) => m.id === sentId);
+            if (found.length > 0) setMessages((prev) => mergeMessages(prev, found));
+          })
+          .catch(() => {});
+      }, 2500);
     },
-    [api]
+    [api, kickEventLoop]
   );
 
   const uploadFile = useCallback(
@@ -1126,62 +1546,16 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         op: 'add',
         flag: 'read',
       });
-      // Clear local unread counts for the current narrow
-      const narrow = currentNarrowRef.current;
-      if (narrow.length === 0) return;
-      const dmNarrow = narrow.find((n) => n.operator === 'dm' || n.operator === 'pm-with');
-      const streamNarrow = narrow.find((n) => n.operator === 'stream' || n.operator === 'channel');
-      const topicNarrow = narrow.find((n) => n.operator === 'topic' || n.operator === 'subject');
-
-      if (dmNarrow) {
-        // Clear the badge for this conversation, keyed by participant set.
-        const others = String(dmNarrow.operand)
-          .split(',')
-          .map((e) => e.trim().toLowerCase())
-          .filter(Boolean);
-        const myId = currentUserRef.current?.user_id;
-        const ids: number[] = [];
-        if (myId !== undefined) ids.push(myId);
-        for (const email of others) {
-          const u = users.find((x) => x.email.toLowerCase() === email);
-          if (u && !ids.includes(u.user_id)) ids.push(u.user_id);
-        }
-        if (ids.length > 0) {
-          const key = dmKey(ids);
-          setUnreadCounts((prev) => {
-            const pms = { ...prev.pms };
-            delete pms[key];
-            return { ...prev, pms };
-          });
-        }
-      }
-      if (streamNarrow && topicNarrow) {
-        setUnreadCounts((prev) => {
-          const streams = { ...prev.streams };
-          // Find stream ID - operand could be name or ID
-          const operand = streamNarrow.operand;
-          const topicName = String(topicNarrow.operand);
-          let streamId: number | undefined;
-          if (typeof operand === 'number') {
-            streamId = operand;
-          } else {
-            const sub = subscriptions.find((s) => s.name === operand || s.stream_id === Number(operand));
-            streamId = sub?.stream_id;
-          }
-          if (streamId !== undefined) {
-            delete streams[`${streamId}:${topicName}`];
-          }
-          return { ...prev, streams };
-        });
-      }
+      forgetUnread(messageIds);
+      clearNarrowUnread(currentNarrowRef.current);
     },
-    [api, users, subscriptions]
+    [api, forgetUnread, clearNarrowUnread]
   );
 
   const sendTyping = useCallback(
-    async (to: number[], op: 'start' | 'stop') => {
+    async (target: TypingTarget, op: 'start' | 'stop') => {
       if (!api) return;
-      await api.sendTypingNotification({ op, to }).catch(() => {});
+      await api.sendTypingNotification({ op, ...target }).catch(() => {});
     },
     [api]
   );
@@ -1227,7 +1601,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       try {
         const resolved = resolveUrl(url);
         const res = await platform.fetch(resolved, {
-          headers: api ? { Authorization: (api as any).authHeader } : {},
+          headers: api ? { Authorization: api.authHeader } : {},
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
@@ -1302,6 +1676,41 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [api]
   );
 
+  const fetchUnreadMessages = useCallback(async (): Promise<ZulipMessage[]> => {
+    if (!api) return [];
+    const res = await api.getMessages({
+      narrow: [{ operator: 'is', operand: 'unread' }],
+      anchor: 'newest',
+      num_before: 300,
+      num_after: 0,
+    });
+    return res.messages;
+  }, [api]);
+
+  const renameTopic = useCallback(
+    async (messageId: number, newTopic: string) => {
+      if (!api) return;
+      await api.editMessage(messageId, { topic: newTopic, propagate_mode: 'change_all' });
+    },
+    [api]
+  );
+
+  const markAllAsRead = useCallback(async () => {
+    if (!api) return;
+    await api.markAllAsRead();
+    unreadRef.current.clear();
+    publishUnread();
+  }, [api, publishUnread]);
+
+  const setInvisible = useCallback(
+    async (invisible: boolean) => {
+      if (!api) return;
+      await api.updateSettings({ presence_enabled: !invisible });
+      setPresenceEnabled(!invisible);
+    },
+    [api]
+  );
+
   return (
     <ZulipContext.Provider
       value={{
@@ -1320,11 +1729,18 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         loading,
         loadingOlder,
         hasMoreMessages,
+        hasNewerMessages,
+        loadingNewer,
+        focusMessageId,
         login,
         logout,
         loadTopics,
+        clearNarrow,
         loadMessages,
         loadOlderMessages,
+        loadNewerMessages,
+        jumpToPresent,
+        setMessageOpener,
         sendMessage,
         uploadFile,
         addReaction,
@@ -1340,6 +1756,15 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         userStatusEmoji,
         updateUserStatus,
         muteStream,
+        presenceEnabled,
+        setInvisible,
+        giphyApiKey,
+        realmName,
+        unreadMentionCount,
+        fetchUnreadMessages,
+        renameTopic,
+        markAllAsRead,
+        autoLoginError,
         resolveUrl,
         fetchAuthenticatedUrl,
       }}

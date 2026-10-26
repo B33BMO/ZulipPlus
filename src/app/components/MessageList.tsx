@@ -6,7 +6,8 @@ import { useZulip } from '../context/ZulipContext';
 import { platform } from '../platform';
 import type { ZulipMessage } from '../api/types';
 import { format } from 'date-fns';
-import { ArrowDown, Loader2, Pencil, Quote, SmilePlus, Trash2 } from 'lucide-react';
+import { nameColor } from '../lib/zulipMarkdown';
+import { ArrowDown, ChevronRight, Hash, Loader2, Pencil, Quote, SmilePlus, Trash2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { Button } from './ui/button';
 import { EmojiPicker } from './EmojiPicker';
@@ -14,10 +15,98 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } f
 
 interface MessageListProps {
   onQuote?: (message: ZulipMessage) => void;
+  /** In-app targets for Zulip `#narrow/...` links inside messages. */
+  /** `anchor` is the message a `/near/<id>` link points at, if any. */
+  onNavigateToTopic?: (streamId: number, topicName: string, anchor?: number) => void;
+  onNavigateToDm?: (userIds: number[], anchor?: number) => void;
+  /** Compact: timestamp gutter, no avatars. Comfortable: avatars. */
+  density?: 'compact' | 'comfortable';
+  /**
+   * For lists drawn from many conversations (Mentions, Starred): label each
+   * run of messages with where it was posted.
+   */
+  showRecipients?: boolean;
+  /** Opens a message's own conversation (recipient labels in mixed lists). */
+  onOpenMessage?: (message: ZulipMessage) => void;
 }
 
-export function MessageList({ onQuote }: MessageListProps = {}) {
-  const { messages, currentUser, markMessagesAsRead, addReaction, removeReaction, editMessage, deleteMessage, getMessageRaw, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji } = useZulip();
+// Which conversation a message belongs to, for grouping in mixed lists.
+function conversationKey(m: ZulipMessage): string {
+  if (m.type === 'stream') return `s:${m.stream_id}:${m.subject.toLowerCase()}`;
+  const ids = Array.isArray(m.display_recipient) ? m.display_recipient.map((r) => r.id) : [];
+  return `p:${ids.sort((a, b) => a - b).join(',')}`;
+}
+
+// Inverse of Zulip's hash-component encoding (see encodeHashComponent).
+function decodeHashComponent(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\./g, '%'));
+  } catch {
+    return value;
+  }
+}
+
+type NarrowTarget =
+  | { kind: 'topic'; streamId: number; topic: string; near?: number }
+  | { kind: 'dm'; userIds: number[]; near?: number };
+
+// Parse the conversation a Zulip narrow link points at, e.g.
+//   #narrow/channel/8-Customers/topic/Backups/near/123
+//   #narrow/stream/8-Customers/topic/Backups        (pre-9.0 spelling)
+//   #narrow/dm/10,12-group/near/456
+// Returns null for anything we can't open in-app (channel-only, searches…).
+function parseNarrowLink(href: string): NarrowTarget | null {
+  const idx = href.indexOf('#narrow/');
+  if (idx === -1) return null;
+  const parts = href.slice(idx + '#narrow/'.length).split('/');
+  const get = (op: string) => {
+    const i = parts.indexOf(op);
+    return i !== -1 && i + 1 < parts.length ? parts[i + 1] : undefined;
+  };
+  const nearRaw = get('near') ?? get('with');
+  const nearId = nearRaw !== undefined ? parseInt(nearRaw, 10) : NaN;
+  const near = Number.isFinite(nearId) ? nearId : undefined;
+  const channel = get('channel') ?? get('stream');
+  const topic = get('topic') ?? get('subject');
+  if (channel && topic !== undefined) {
+    const streamId = parseInt(channel, 10);
+    if (Number.isFinite(streamId)) {
+      return { kind: 'topic', streamId, topic: decodeHashComponent(topic), near };
+    }
+  }
+  const dm = get('dm') ?? get('pm-with');
+  if (dm) {
+    const userIds = dm.split('-')[0].split(',').map((n) => parseInt(n, 10));
+    if (userIds.length > 0 && userIds.every(Number.isFinite)) return { kind: 'dm', userIds, near };
+  }
+  return null;
+}
+
+function dayKey(timestamp: number): string {
+  const d = new Date(timestamp * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function dayLabel(timestamp: number): string {
+  const d = new Date(timestamp * 1000);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (dayKey(timestamp) === dayKey(today.getTime() / 1000)) return 'Today';
+  if (dayKey(timestamp) === dayKey(yesterday.getTime() / 1000)) return 'Yesterday';
+  return format(d, d.getFullYear() === today.getFullYear() ? 'EEEE, MMMM d' : 'MMMM d, yyyy');
+}
+
+export function MessageList({
+  onQuote,
+  onNavigateToTopic,
+  onNavigateToDm,
+  density = 'compact',
+  showRecipients = false,
+  onOpenMessage,
+}: MessageListProps = {}) {
+  const compact = density === 'compact';
+  const { users, subscriptions, messages, currentUser, markMessagesAsRead, addReaction, removeReaction, editMessage, deleteMessage, getMessageRaw, resolveUrl, fetchAuthenticatedUrl, loadOlderMessages, hasMoreMessages, loadingOlder, realmEmoji, serverUrl, hasNewerMessages, loadingNewer, loadNewerMessages, jumpToPresent, focusMessageId } = useZulip();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevScrollHeight = useRef(0);
@@ -26,6 +115,11 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
   // is empty / we're painting a freshly-opened conversation.
   const lastMessageIdRef = useRef<number | null>(null);
   const [unreadBelow, setUnreadBelow] = useState(0);
+  // Briefly highlighted after opening the view at a specific message.
+  const [highlightId, setHighlightId] = useState<number | null>(null);
+  // Set while a page of newer messages is being appended, so the auto-scroll
+  // effect doesn't treat that page as fresh arrivals and yank to the bottom.
+  const appendingNewerRef = useRef(false);
   const [reactingMessageId, setReactingMessageId] = useState<number | null>(null);
   const [pickerPos, setPickerPos] = useState<{ right: number; bottom: number } | null>(null);
   const reactPickerRef = useRef<HTMLDivElement>(null);
@@ -155,13 +249,32 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       // the scheme.
       e.preventDefault();
       if (!href) return;
-      if (href.startsWith('http://') || href.startsWith('https://')) {
+      // Links to another conversation on this server (channel/topic
+      // mentions, quote "said" links) open here rather than in a browser.
+      // Only for this server: a #narrow link to some other Zulip org
+      // still belongs in the browser.
+      const ownServer =
+        href.startsWith('#') ||
+        href.startsWith('/') ||
+        href.startsWith(resolveUrl('/')) ||
+        (!!serverUrl && href.startsWith(serverUrl.replace(/\/+$/, '') + '/'));
+      const target = ownServer ? parseNarrowLink(href) : null;
+      if (target?.kind === 'topic' && onNavigateToTopic) {
+        onNavigateToTopic(target.streamId, target.topic, target.near);
+        return;
+      }
+      if (target?.kind === 'dm' && onNavigateToDm && currentUser) {
+        const ids = target.userIds.includes(currentUser.user_id)
+          ? target.userIds
+          : [...target.userIds, currentUser.user_id];
+        onNavigateToDm(ids, target.near);
+        return;
+      }
+      if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:')) {
         platform.openExternal(href).catch(() => {});
       }
-      // Other schemes (mailto:, #narrow/...) are intentionally swallowed
-      // for now — we can wire internal narrow navigation as a follow-up.
     }
-  }, [fetchAuthenticatedUrl, toggleSpoiler]);
+  }, [fetchAuthenticatedUrl, toggleSpoiler, onNavigateToTopic, onNavigateToDm, currentUser, resolveUrl, serverUrl]);
 
   // Close reaction picker on click outside
   useEffect(() => {
@@ -214,6 +327,22 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     const sentByMe = !!currentUser && newest.sender_id === currentUser.user_id;
     lastMessageIdRef.current = newest.id;
 
+    if (appendingNewerRef.current) {
+      appendingNewerRef.current = false;
+      return;
+    }
+
+    // Opened at a specific message: centre it rather than jumping to the end.
+    if (isFirstPaint && focusMessageId !== null) {
+      const target = el.querySelector(`[data-message-id="${focusMessageId}"]`);
+      if (target) {
+        target.scrollIntoView({ block: 'center', behavior: 'instant' });
+        isNearBottom.current = checkNearBottom();
+        setHighlightId(focusMessageId);
+        return;
+      }
+    }
+
     if (isFirstPaint || sentByMe || (isNewArrival && isNearBottom.current)) {
       scrollToBottom(!isFirstPaint);
       isNearBottom.current = true;
@@ -221,7 +350,13 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     } else if (isNewArrival) {
       setUnreadBelow((n) => n + 1);
     }
-  }, [messages, scrollToBottom, currentUser]);
+  }, [messages, scrollToBottom, currentUser, focusMessageId, checkNearBottom]);
+
+  useEffect(() => {
+    if (highlightId === null) return;
+    const t = window.setTimeout(() => setHighlightId(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [highlightId]);
 
   // Lazy loading: detect scroll to top + track near-bottom
   const handleScroll = useCallback(() => {
@@ -230,6 +365,14 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
 
     isNearBottom.current = checkNearBottom();
     if (isNearBottom.current) setUnreadBelow(0);
+
+    // Anchored view: page in newer messages as the reader nears the end.
+    if (isNearBottom.current && hasNewerMessages && !loadingNewer) {
+      appendingNewerRef.current = true;
+      loadNewerMessages()
+        .then((added) => { if (!added) appendingNewerRef.current = false; })
+        .catch(() => { appendingNewerRef.current = false; });
+    }
 
     if (!hasMoreMessages || loadingOlder) return;
     if (el.scrollTop < 100) {
@@ -240,7 +383,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
         if (!added) prevScrollHeight.current = 0;
       });
     }
-  }, [hasMoreMessages, loadingOlder, loadOlderMessages, checkNearBottom]);
+  }, [hasMoreMessages, loadingOlder, loadOlderMessages, checkNearBottom, hasNewerMessages, loadingNewer, loadNewerMessages]);
 
   // Mark messages as read — but only while the app actually has focus.
   // Marking on arrival regardless of focus meant messages that landed while
@@ -378,11 +521,13 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     const existing = message.reactions.find(
       (r) => r.emoji_name === emojiName && r.user_id === currentUser.user_id
     );
-    if (existing) {
-      removeReaction(message.id, emojiName);
-    } else {
-      addReaction(message.id, emojiName);
-    }
+    // Pass the code + type through: for custom emoji the name alone can be
+    // ambiguous, and the server needs both to resolve them.
+    const op = existing ? removeReaction : addReaction;
+    const sample = existing ?? message.reactions.find((r) => r.emoji_name === emojiName);
+    op(message.id, emojiName, sample?.emoji_code, sample?.reaction_type).catch((err) => {
+      console.error('Failed to update reaction:', err);
+    });
   };
 
   // Group reactions by emoji
@@ -505,26 +650,67 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
     const reactionGroups = groupReactions(message);
     if (reactionGroups.length === 0) return null;
     return (
-      <div className="flex gap-1 mt-1 flex-wrap">
+      <div className="flex gap-1 mt-1 mb-0.5 flex-wrap">
         {reactionGroups.map((rg) => (
           <button
             key={rg.emoji_name}
             onClick={() => handleReactionClick(message, rg.emoji_name)}
-            className={`flex items-center gap-1 border rounded px-1.5 py-0.5 cursor-pointer ${
+            title={`:${rg.emoji_name}:`}
+            className={`flex items-center gap-1 h-[22px] border rounded-full px-2 cursor-pointer text-[12px] tabular-nums ${
               currentUser && rg.userIds.includes(currentUser.user_id)
-                ? 'bg-brand-muted border-brand/50'
-                : 'bg-surface-secondary hover:bg-surface-hover border-surface-hover'
+                ? 'bg-brand-muted border-brand/45 text-text-link'
+                : 'bg-transparent hover:bg-surface-hover border-line text-text-secondary'
             }`}
           >
-            <span className="text-sm">
+            <span className="text-[13px] leading-none">
               {renderEmoji(rg.emoji_name, rg.emoji_code, rg.reaction_type)}
             </span>
-            <span className="text-xs text-text-secondary">{rg.count}</span>
+            <span>{rg.count}</span>
           </button>
         ))}
       </div>
     );
   };
+
+  // Message body, or the inline editor when this message is being edited.
+  const renderBody = (message: (typeof processedMessages)[number]) => (
+    <>
+      {editingMessageId === message.id ? (
+        <div className="space-y-2">
+          <textarea
+            autoFocus
+            value={editDraft}
+            onChange={(e) => setEditDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit(); }
+            }}
+            className="w-full bg-surface-tertiary text-text-primary text-sm rounded p-2 border border-surface-hover focus:border-brand outline-none font-mono resize-y min-h-[3rem]"
+          />
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={saveEdit} disabled={editSaving || !editDraft.trim()}>
+              {editSaving ? 'Saving…' : 'Save'}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={editSaving}>
+              Cancel
+            </Button>
+            <span className="text-xs text-text-muted">
+              Ctrl+Enter to save, Esc to cancel
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div
+          className="text-text-primary text-[13px] leading-5 break-words zulip-content"
+          dangerouslySetInnerHTML={{ __html: message._html }}
+        />
+      )}
+      {message.last_edit_timestamp && editingMessageId !== message.id && (
+        <span className="text-[10px] text-text-muted">(edited)</span>
+      )}
+      {renderReactions(message)}
+    </>
+  );
 
   return (
     <>
@@ -534,7 +720,7 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
       onScroll={handleScroll}
       onClick={handleContentClick}
       onKeyDown={handleContentKeyDown}
-      className="flex-1 min-h-0 overflow-y-auto px-4"
+      className="flex-1 min-h-0 overflow-y-auto"
     >
       {/* Loading older messages indicator */}
       {loadingOlder && (
@@ -543,107 +729,156 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
         </div>
       )}
 
-      <div className="py-4 space-y-4">
+      <TooltipProvider>
+      <div className="py-2">
         {processedMessages.map((message, idx) => {
           const prevMessage = idx > 0 ? processedMessages[idx - 1] : null;
+          const newDay = !prevMessage || dayKey(prevMessage.timestamp) !== dayKey(message.timestamp);
+          const newConversation =
+            showRecipients && (!prevMessage || conversationKey(prevMessage) !== conversationKey(message));
           const showHeader =
+            newDay ||
+            newConversation ||
             !prevMessage ||
             prevMessage.sender_id !== message.sender_id ||
             message.timestamp - prevMessage.timestamp > 300;
+          const mentionsMe = (message.flags ?? []).some(
+            (f) => f === 'mentioned' || f === 'wildcard_mentioned'
+          );
+          const sender = users.find((u) => u.user_id === message.sender_id);
+          const time = format(new Date(message.timestamp * 1000), 'h:mm a');
 
           return (
+            <div key={message.id}>
+            {newDay && (
+              <div className={`flex items-center gap-3 pl-16 pr-6 ${idx === 0 ? 'mt-2' : 'mt-5'} mb-1`} role="separator">
+                <span className="text-[11px] font-medium text-text-muted">
+                  {dayLabel(message.timestamp)}
+                </span>
+                <div className="flex-1 border-t border-line" />
+              </div>
+            )}
+            {newConversation && (
+              <button
+                onClick={() => onOpenMessage?.(message)}
+                className={`flex items-center gap-1.5 ml-16 mr-6 ${newDay ? 'mt-1' : 'mt-4'} mb-0.5 text-[12px] text-text-secondary hover:text-text-primary`}
+              >
+                {message.type === 'stream' ? (
+                  <>
+                    <Hash
+                      className="size-3"
+                      style={{ color: subscriptions.find((s) => s.stream_id === message.stream_id)?.color }}
+                    />
+                    <span>
+                      {typeof message.display_recipient === 'string' ? message.display_recipient : ''}
+                    </span>
+                    <ChevronRight className="size-3 text-text-muted" />
+                    <span className="font-medium text-text-primary">{message.subject}</span>
+                  </>
+                ) : (
+                  <span>
+                    DM ·{' '}
+                    {(Array.isArray(message.display_recipient) ? message.display_recipient : [])
+                      .filter((r) => r.id !== currentUser?.user_id)
+                      .map((r) => r.full_name)
+                      .join(', ') || 'You'}
+                  </span>
+                )}
+              </button>
+            )}
             <div
-              key={message.id}
-              className="group relative hover:bg-surface-secondary -mx-2 px-2 py-0.5"
+              data-message-id={message.id}
+              style={
+                mentionsMe && highlightId !== message.id
+                  ? { background: 'color-mix(in srgb, var(--brand) 7%, transparent)' }
+                  : undefined
+              }
+              className={`group relative flex pr-6 transition-colors duration-700 ${
+                highlightId === message.id ? 'bg-brand-muted' : 'hover:bg-surface-hover'
+              } ${showHeader && !newDay && !newConversation && idx > 0 ? (compact ? 'mt-2' : 'mt-4') : ''} ${
+                compact ? 'py-px' : 'py-0.5'
+              }`}
             >
               {/* Hover action buttons */}
-              <div className="absolute right-2 top-0 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-                <div className="flex items-center gap-0.5 bg-surface-secondary border border-surface-hover rounded shadow-lg">
-                  <TooltipProvider>
+              <div className="absolute right-4 top-0 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity z-10">
+                <div className="flex items-center gap-0.5 p-0.5 bg-surface-secondary border border-line rounded-md shadow-sm">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
+                        onClick={(e) => {
+                          if (reactingMessageId === message.id) {
+                            setReactingMessageId(null);
+                            setPickerPos(null);
+                          } else {
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            const pickerHeight = 384; // h-96
+                            // Position upward from the bottom of the button
+                            let bottom = window.innerHeight - rect.top + 4;
+                            // If picker would go above viewport, position downward instead
+                            if (rect.top - pickerHeight < 8) {
+                              bottom = window.innerHeight - rect.bottom - pickerHeight - 4;
+                              // Clamp so picker stays on screen
+                              if (bottom < 8) bottom = 8;
+                            }
+                            setPickerPos({
+                              right: Math.max(8, window.innerWidth - rect.right),
+                              bottom: Math.max(8, bottom),
+                            });
+                            setReactingMessageId(message.id);
+                          }
+                        }}
+                      >
+                        <SmilePlus className="size-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent><p>Add Reaction</p></TooltipContent>
+                  </Tooltip>
+                  {onQuote && (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
-                          onClick={(e) => {
-                            if (reactingMessageId === message.id) {
-                              setReactingMessageId(null);
-                              setPickerPos(null);
-                            } else {
-                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                              const pickerHeight = 384; // h-96
-                              // Position upward from the bottom of the button
-                              let bottom = window.innerHeight - rect.top + 4;
-                              // If picker would go above viewport, position downward instead
-                              if (rect.top - pickerHeight < 8) {
-                                bottom = window.innerHeight - rect.bottom - pickerHeight - 4;
-                                // Clamp so picker stays on screen
-                                if (bottom < 8) bottom = 8;
-                              }
-                              setPickerPos({
-                                right: Math.max(8, window.innerWidth - rect.right),
-                                bottom: Math.max(8, bottom),
-                              });
-                              setReactingMessageId(message.id);
-                            }
-                          }}
+                          onClick={() => handleQuote(message)}
                         >
-                          <SmilePlus className="size-3.5" />
+                          <Quote className="size-3.5" />
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent><p>Add Reaction</p></TooltipContent>
+                      <TooltipContent><p>Quote</p></TooltipContent>
                     </Tooltip>
-                  </TooltipProvider>
-                  {onQuote && (
-                    <TooltipProvider>
+                  )}
+                  {currentUser && message.sender_id === currentUser.user_id && (
+                    <>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
                             variant="ghost"
                             size="icon"
                             className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
-                            onClick={() => handleQuote(message)}
+                            onClick={() => startEdit(message.id)}
                           >
-                            <Quote className="size-3.5" />
+                            <Pencil className="size-3.5" />
                           </Button>
                         </TooltipTrigger>
-                        <TooltipContent><p>Quote</p></TooltipContent>
+                        <TooltipContent><p>Edit</p></TooltipContent>
                       </Tooltip>
-                    </TooltipProvider>
-                  )}
-                  {currentUser && message.sender_id === currentUser.user_id && (
-                    <>
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7 text-text-secondary hover:text-text-primary hover:bg-surface-hover"
-                              onClick={() => startEdit(message.id)}
-                            >
-                              <Pencil className="size-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent><p>Edit</p></TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7 text-red-400 hover:text-red-300 hover:bg-surface-hover"
-                              onClick={() => setDeleteTargetId(message.id)}
-                            >
-                              <Trash2 className="size-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent><p>Delete</p></TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 text-red-400 hover:text-red-300 hover:bg-surface-hover"
+                            onClick={() => setDeleteTargetId(message.id)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent><p>Delete</p></TooltipContent>
+                      </Tooltip>
                     </>
                   )}
                 </div>
@@ -665,117 +900,74 @@ export function MessageList({ onQuote }: MessageListProps = {}) {
                   document.body
                 )}
               </div>
-              {showHeader ? (
-                <div className="flex gap-3">
-                  <Avatar className="size-10 mt-0.5 flex-shrink-0">
-                    <AvatarImage
-                      src={resolveUrl(message.avatar_url)}
-                      alt={message.sender_full_name}
-                    />
-                    <AvatarFallback>
+              {/* Gutter: timestamps (compact) or the avatar (comfortable). */}
+              <div className="w-16 shrink-0 flex justify-end pr-3">
+                {compact || !showHeader ? (
+                  <span
+                    className={`text-[11px] leading-5 text-text-muted tabular-nums whitespace-nowrap ${
+                      compact ? '' : 'invisible group-hover:visible'
+                    }`}
+                    title={format(new Date(message.timestamp * 1000), 'PPPP p')}
+                  >
+                    {time}
+                  </span>
+                ) : (
+                  <Avatar className="size-8 rounded-lg mt-0.5">
+                    <AvatarImage src={resolveUrl(message.avatar_url)} alt="" />
+                    <AvatarFallback className="rounded-lg text-xs font-semibold">
                       {message.sender_full_name[0]}
                     </AvatarFallback>
                   </Avatar>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-2 mb-0.5">
-                      <span className="font-semibold text-text-primary text-sm">
-                        {message.sender_full_name}
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                {showHeader && (
+                  <div className="flex items-baseline gap-2 leading-5">
+                    <span className="font-semibold text-[13px]" style={{ color: nameColor(message.sender_id) }}>
+                      {message.sender_full_name}
+                    </span>
+                    {sender?.is_bot && (
+                      <span className="text-[10px] leading-[15px] px-1 rounded border border-line text-text-muted self-center">
+                        BOT
                       </span>
-                      <span className="text-xs text-text-muted">
+                    )}
+                    {!compact && (
+                      <span className="text-[11px] text-text-muted" title={format(new Date(message.timestamp * 1000), 'PPPP p')}>
                         {formatTime(message.timestamp)}
                       </span>
-                    </div>
-                    {editingMessageId === message.id ? (
-                      <div className="space-y-2">
-                        <textarea
-                          autoFocus
-                          value={editDraft}
-                          onChange={(e) => setEditDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
-                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit(); }
-                          }}
-                          className="w-full bg-surface-tertiary text-text-primary text-sm rounded p-2 border border-surface-hover focus:border-brand outline-none font-mono resize-y min-h-[3rem]"
-                        />
-                        <div className="flex items-center gap-2">
-                          <Button size="sm" onClick={saveEdit} disabled={editSaving || !editDraft.trim()}>
-                            {editSaving ? 'Saving…' : 'Save'}
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={editSaving}>
-                            Cancel
-                          </Button>
-                          <span className="text-xs text-text-muted">
-                            Ctrl+Enter to save, Esc to cancel
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div
-                        className="text-text-primary text-sm leading-relaxed break-words zulip-content"
-                        dangerouslySetInnerHTML={{ __html: message._html }}
-                      />
                     )}
-                    {message.last_edit_timestamp && editingMessageId !== message.id && (
-                      <span className="text-[10px] text-text-muted ml-1">(edited)</span>
-                    )}
-                    {renderReactions(message)}
                   </div>
-                </div>
-              ) : (
-                <div className="flex gap-3">
-                  <div className="w-10 flex-shrink-0 flex items-center justify-end">
-                    <span className="text-xs text-text-muted opacity-0 group-hover:opacity-100">
-                      {format(new Date(message.timestamp * 1000), 'h:mm a')}
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    {editingMessageId === message.id ? (
-                      <div className="space-y-2">
-                        <textarea
-                          autoFocus
-                          value={editDraft}
-                          onChange={(e) => setEditDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
-                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit(); }
-                          }}
-                          className="w-full bg-surface-tertiary text-text-primary text-sm rounded p-2 border border-surface-hover focus:border-brand outline-none font-mono resize-y min-h-[3rem]"
-                        />
-                        <div className="flex items-center gap-2">
-                          <Button size="sm" onClick={saveEdit} disabled={editSaving || !editDraft.trim()}>
-                            {editSaving ? 'Saving…' : 'Save'}
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={cancelEdit} disabled={editSaving}>
-                            Cancel
-                          </Button>
-                          <span className="text-xs text-text-muted">
-                            Ctrl+Enter to save, Esc to cancel
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div
-                        className="text-text-primary text-sm leading-relaxed break-words zulip-content"
-                        dangerouslySetInnerHTML={{ __html: message._html }}
-                      />
-                    )}
-                    {message.last_edit_timestamp && editingMessageId !== message.id && (
-                      <span className="text-[10px] text-text-muted ml-1">(edited)</span>
-                    )}
-                    {renderReactions(message)}
-                  </div>
-                </div>
-              )}
+                )}
+                {renderBody(message)}
+              </div>
+            </div>
             </div>
           );
         })}
+        {loadingNewer && (
+          <div className="flex justify-center py-3">
+            <Loader2 className="size-5 text-text-secondary animate-spin" />
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
+      </TooltipProvider>
     </div>
 
     {/* Jump to latest — shown when messages arrived while reading scrollback,
         so following the conversation never requires hunting for the bottom. */}
-    {unreadBelow > 0 && (
+    {/* Viewing an older stretch (opened from search / a link): one click
+        back to the live end of the conversation. */}
+    {hasNewerMessages && (
+      <button
+        onClick={() => { jumpToPresent().catch(() => {}); }}
+        className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 rounded-full bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-brand-hover"
+      >
+        <ArrowDown className="size-3.5" />
+        Jump to present
+      </button>
+    )}
+    {unreadBelow > 0 && !hasNewerMessages && (
       <button
         onClick={() => { scrollToBottom(true); isNearBottom.current = true; setUnreadBelow(0); }}
         className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 rounded-full bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-brand-hover"
