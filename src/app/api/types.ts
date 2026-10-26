@@ -170,6 +170,8 @@ export interface RegisterEventQueueResponse {
   msg: string;
   queue_id: string;
   last_event_id: number;
+  /** Always present on /register; gates newer API features. */
+  zulip_feature_level?: number;
   max_message_id: number;
   unread_msgs?: {
     count: number;

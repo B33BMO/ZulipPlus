@@ -185,8 +185,13 @@ interface ZulipContextValue {
   realmIconUrl: string;
   /** Unread messages that mention you, for the Mentions badge. */
   unreadMentionCount: number;
-  /** Recent unread messages across every conversation (Inbox previews). */
-  fetchUnreadMessages: () => Promise<ZulipMessage[]>;
+  /** The newest unread message in each unread conversation (Inbox previews). */
+  fetchInboxPreviews: () => Promise<ZulipMessage[]>;
+  /**
+   * Conversations holding an unread mention, as Inbox row keys:
+   * `s:<streamId>:<topic lowercased>` or `p:<dmKey>`.
+   */
+  unreadMentionKeys: Set<string>;
   /**
    * Rename a whole topic (Zulip's "resolve" is a rename to a "✔ " prefix).
    * `messageId` is any message in the topic.
@@ -251,6 +256,8 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   const [realmName, setRealmName] = useState('');
   const [realmIconUrl, setRealmIconUrl] = useState('');
   const [unreadMentionCount, setUnreadMentionCount] = useState(0);
+  const [unreadMentionKeys, setUnreadMentionKeys] = useState<Set<string>>(new Set());
+  const featureLevelRef = useRef(0);
   const currentNarrowRef = useRef<ZulipNarrow[]>([]);
 
   // Bumped on every login/logout. Each event loop captures the value it
@@ -324,10 +331,17 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       bucket[key] = (bucket[key] || 0) + 1;
     }
     setUnreadCounts({ streams, pms });
+    const mentionKeys = new Set<string>();
     for (const id of mentionIdsRef.current) {
-      if (!unreadRef.current.has(id)) mentionIdsRef.current.delete(id);
+      const loc = unreadRef.current.get(id);
+      if (!loc) {
+        mentionIdsRef.current.delete(id);
+        continue;
+      }
+      mentionKeys.add(loc.kind === 'streams' ? `s:${loc.key.toLowerCase()}` : `p:${loc.key}`);
     }
     setUnreadMentionCount(mentionIdsRef.current.size);
+    setUnreadMentionKeys(mentionKeys);
   }, []);
 
   const forgetUnread = useCallback(
@@ -397,6 +411,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
       if (typeof enabled === 'boolean') setPresenceEnabled(enabled);
       setGiphyApiKey(reg.giphy_api_key ?? '');
       if (reg.realm_name) setRealmName(reg.realm_name);
+      if (typeof reg.zulip_feature_level === 'number') featureLevelRef.current = reg.zulip_feature_level;
       if (reg.realm_icon_url !== undefined) {
         setRealmIconUrl(reg.realm_icon_source === 'U' ? reg.realm_icon_url : '');
       }
@@ -1083,6 +1098,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         .getServerSettings()
         .then((ss) => {
           if (ss.realm_name) setRealmName(ss.realm_name);
+          if (typeof ss.zulip_feature_level === 'number') featureLevelRef.current = ss.zulip_feature_level;
           if (ss.realm_icon && !/gravatar\.com/i.test(ss.realm_icon)) setRealmIconUrl(ss.realm_icon);
         })
         .catch(() => {});
@@ -1235,6 +1251,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     unreadRef.current.clear();
     mentionIdsRef.current.clear();
     setUnreadMentionCount(0);
+    setUnreadMentionKeys(new Set());
     setRealmName('');
     setRealmIconUrl('');
     setConnectionError(null);
@@ -1706,8 +1723,28 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     [api]
   );
 
-  const fetchUnreadMessages = useCallback(async (): Promise<ZulipMessage[]> => {
+  // Fetching "the newest N unread" starves quiet conversations whenever one
+  // channel is busy (Monitoring's alerts filled all 300, leaving most Inbox
+  // rows without a preview). Instead take the newest unread id per
+  // conversation from the unread map and fetch exactly those.
+  const fetchInboxPreviews = useCallback(async (): Promise<ZulipMessage[]> => {
     if (!api) return [];
+    const newest = new Map<string, number>();
+    for (const [id, loc] of unreadRef.current) {
+      const k = `${loc.kind}:${loc.key.toLowerCase()}`;
+      if ((newest.get(k) ?? 0) < id) newest.set(k, id);
+    }
+    const ids = Array.from(newest.values());
+    if (ids.length === 0) return [];
+    if (featureLevelRef.current >= 300) {
+      const out: ZulipMessage[] = [];
+      for (let i = 0; i < ids.length; i += 500) {
+        const res = await api.getMessagesByIds(ids.slice(i, i + 500));
+        out.push(...res.messages);
+      }
+      return out;
+    }
+    // Pre-9.0 servers: best effort with the newest unread messages overall.
     const res = await api.getMessages({
       narrow: [{ operator: 'is', operand: 'unread' }],
       anchor: 'newest',
@@ -1792,7 +1829,8 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         realmName,
         realmIconUrl,
         unreadMentionCount,
-        fetchUnreadMessages,
+        fetchInboxPreviews,
+        unreadMentionKeys,
         renameTopic,
         markAllAsRead,
         autoLoginError,

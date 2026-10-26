@@ -8,6 +8,7 @@ import {
   Lock,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Star,
   Volume2,
@@ -29,6 +30,8 @@ interface SidebarProps {
   onSelectTopic: (streamId: number, topicName: string) => void;
   onSelectSpecial: (view: SpecialView) => void;
   onOpenSearch: () => void;
+  /** Start a DM or group DM with anyone in the org. */
+  onNewDm: () => void;
   activeDM: number[] | null;
   activeTopic: { streamId: number; topicName: string } | null;
   activeSpecial: SpecialView | null;
@@ -87,6 +90,7 @@ export function Sidebar({
   onSelectTopic,
   onSelectSpecial,
   onOpenSearch,
+  onNewDm,
   activeDM,
   activeTopic,
   activeSpecial,
@@ -348,9 +352,23 @@ export function Sidebar({
         </div>
 
         {/* Direct messages */}
-        {dmConversations.length > 0 && (
-          <div className="flex flex-col gap-px">
-            <SectionLabel>Direct messages</SectionLabel>
+        <div className="flex flex-col gap-px">
+            <div className="flex items-center pr-1">
+              <SectionLabel>Direct messages</SectionLabel>
+              <button
+                onClick={onNewDm}
+                aria-label="New direct message"
+                title="New DM or group"
+                className="ml-auto -mt-1 size-5 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-surface-hover"
+              >
+                <Plus className="size-3.5" />
+              </button>
+            </div>
+            {dmConversations.length === 0 && (
+              <button onClick={onNewDm} className="h-7 px-2 text-left text-[13px] text-text-muted hover:text-text-primary">
+                Start a conversation…
+              </button>
+            )}
             {(showAllDMs ? dmConversations : dmConversations.slice(0, DM_LIMIT)).map((dm) => {
               const key = dmKey(dm.userIds);
               const unread = unreadCounts.pms[key] || 0;
@@ -375,8 +393,7 @@ export function Sidebar({
                 {showAllDMs ? 'Show fewer' : `Show ${dmConversations.length - DM_LIMIT} more`}
               </button>
             )}
-          </div>
-        )}
+        </div>
 
         {/* Channels */}
         <div className="flex flex-col gap-px">

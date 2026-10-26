@@ -174,6 +174,12 @@ export class ZulipApi {
     return this.request(`/messages?${query}`, { signal: params.signal });
   }
 
+  // Specific messages by id, in one request (Zulip 9.0+, feature level 300).
+  async getMessagesByIds(ids: number[]): Promise<GetMessagesResponse> {
+    const query = this.encodeParams({ message_ids: ids, apply_markdown: true });
+    return this.request(`/messages?${query}`);
+  }
+
   async sendMessage(params: {
     type: 'stream' | 'direct';
     to: string | number | number[];

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { AtSign, Check, ChevronRight, Hash, Loader2, Lock, Search, Star, Undo2, Users } from 'lucide-react';
+import { AtSign, Check, ChevronRight, Hash, Loader2, Lock, Search, Star, Undo2, UserPlus, Users } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { Sidebar, type SpecialView } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
@@ -7,6 +7,7 @@ import { RichComposer, type RichComposerHandle } from './components/RichComposer
 import { ProfileDropdown } from './components/ProfileDropdown';
 import { SearchPalette } from './components/SearchPalette';
 import { InboxView } from './components/InboxView';
+import { NewDmDialog } from './components/NewDmDialog';
 import { SignIn } from './components/SignIn';
 import { EditStatusModal } from './components/EditStatusModal';
 import { SettingsModal, type Density } from './components/SettingsModal';
@@ -60,6 +61,8 @@ function AppContent() {
   // the app opens on the Inbox.
   const [activeSpecial, setActiveSpecial] = useState<SpecialView | null>('inbox');
   const [searchOpen, setSearchOpen] = useState(false);
+  // New DM / group picker, optionally seeded with people (Add people).
+  const [newDm, setNewDm] = useState<{ open: boolean; seed: number[] }>({ open: false, seed: [] });
   const [density, setDensity] = useState<Density>(() =>
     localStorage.getItem('zulipplus_density') === 'comfortable' ? 'comfortable' : 'compact'
   );
@@ -469,6 +472,18 @@ function AppContent() {
           {others.length > 1 && (
             <span className="text-[12px] text-text-muted shrink-0">{others.length + 1} people</span>
           )}
+          <div className="ml-auto flex items-center gap-0.5 shrink-0">
+            {/* Adding someone makes a new group conversation, as in Zulip:
+                a DM's participant set is what identifies it. */}
+            <button
+              onClick={() => setNewDm({ open: true, seed: others })}
+              className={headerButton}
+              title="Start a group with these people plus others"
+            >
+              <UserPlus className="size-3.5" />
+              Add people
+            </button>
+          </div>
         </>
       );
     }
@@ -558,6 +573,7 @@ function AppContent() {
         onSelectTopic={handleSelectTopic}
         onSelectSpecial={handleSelectSpecial}
         onOpenSearch={() => setSearchOpen(true)}
+        onNewDm={() => setNewDm({ open: true, seed: [] })}
         activeDM={activeDM}
         activeTopic={activeTopic}
         activeSpecial={activeSpecial}
@@ -600,7 +616,7 @@ function AppContent() {
           <>
             <header className="h-12 shrink-0 border-b border-line pl-6 pr-3 flex items-center gap-2 min-w-0">
               {renderHeader()}
-              {!activeTopic && (
+              {!activeTopic && !activeDM && (
                 <button
                   onClick={() => setSearchOpen(true)}
                   aria-label="Search"
@@ -657,6 +673,12 @@ function AppContent() {
         onOpenMessage={openMessage}
         onOpenDm={handleSelectDM}
         onOpenChannel={handleOpenChannel}
+      />
+      <NewDmDialog
+        open={newDm.open}
+        onOpenChange={(open) => setNewDm((s) => ({ ...s, open }))}
+        initialUserIds={newDm.seed}
+        onStart={handleSelectDM}
       />
       <EditStatusModal open={editStatusOpen} onOpenChange={setEditStatusOpen} />
       <SettingsModal

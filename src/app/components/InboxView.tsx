@@ -46,7 +46,8 @@ export function InboxView({ onOpenTopic, onOpenDm }: InboxViewProps) {
     subscriptions,
     users,
     currentUser,
-    fetchUnreadMessages,
+    fetchInboxPreviews,
+    unreadMentionKeys,
     markAllAsRead,
   } = useZulip();
   const [recent, setRecent] = useState<ZulipMessage[]>([]);
@@ -59,7 +60,7 @@ export function InboxView({ onOpenTopic, onOpenDm }: InboxViewProps) {
   useEffect(() => {
     let cancelled = false;
     const t = setTimeout(() => {
-      fetchUnreadMessages()
+      fetchInboxPreviews()
         .then((msgs) => { if (!cancelled) setRecent(msgs); })
         .catch((err) => console.warn('Inbox preview fetch failed', err));
     }, 300);
@@ -67,13 +68,14 @@ export function InboxView({ onOpenTopic, onOpenDm }: InboxViewProps) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [countsKey, fetchUnreadMessages]);
+  }, [countsKey, fetchInboxPreviews]);
 
   const groups = useMemo<Group[]>(() => {
     const myId = currentUser?.user_id;
-    // Newest unread message per conversation, and whether any mention us.
+    // Newest unread message per conversation. Mentions come from the
+    // context's unread map, which covers every conversation.
     const latest = new Map<string, ZulipMessage>();
-    const mentioned = new Set<string>();
+    const mentioned = unreadMentionKeys;
     for (const m of recent) {
       let key: string | null = null;
       if (m.type === 'stream' && typeof m.stream_id === 'number') {
@@ -86,7 +88,6 @@ export function InboxView({ onOpenTopic, onOpenDm }: InboxViewProps) {
       if (!key) continue;
       const prev = latest.get(key);
       if (!prev || m.id > prev.id) latest.set(key, m);
-      if (m.flags?.some((f) => f === 'mentioned' || f === 'wildcard_mentioned')) mentioned.add(key);
     }
 
     const name = (id: number) =>
@@ -153,7 +154,7 @@ export function InboxView({ onOpenTopic, onOpenDm }: InboxViewProps) {
     }
     streamGroups.sort((a, b) => b.latestTs - a.latestTs);
     return [...out, ...streamGroups];
-  }, [recent, unreadCounts, subscriptions, users, currentUser, onOpenDm, onOpenTopic]);
+  }, [recent, unreadCounts, unreadMentionKeys, subscriptions, users, currentUser, onOpenDm, onOpenTopic]);
 
   const flat = useMemo(() => groups.flatMap((g) => g.rows), [groups]);
   useEffect(() => {

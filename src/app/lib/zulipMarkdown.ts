@@ -113,6 +113,22 @@ export function buildQuote({ rawContent, senderName, senderId, permalink }: Quot
  */
 export function htmlToText(html: string): string {
   const doc = new DOMParser().parseFromString(html, 'text/html');
+  // Emoji: Zulip renders unicode emoji as <span class="emoji emoji-1f7e2">
+  // whose text is the ":name:" code, and custom emoji as <img alt=":name:">.
+  // Swap in the real character (or the alt text) so previews don't read
+  // ":white_circle: #308342…".
+  doc.body.querySelectorAll('span.emoji').forEach((el) => {
+    const m = /\bemoji-([0-9a-f]+(?:-[0-9a-f]+)*)\b/i.exec(el.className);
+    if (!m) return;
+    try {
+      el.textContent = String.fromCodePoint(...m[1].split('-').map((cp) => parseInt(cp, 16)));
+    } catch {
+      // leave the :code: text
+    }
+  });
+  doc.body.querySelectorAll('img.emoji').forEach((el) => {
+    el.replaceWith(doc.createTextNode(el.getAttribute('alt') ?? ''));
+  });
   return doc.body.textContent ?? '';
 }
 
