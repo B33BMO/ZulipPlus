@@ -334,9 +334,19 @@ export class ZulipApi {
       all_public_streams: params?.all_public_streams ?? false,
       apply_markdown: true,
       client_gravatar: false,
-      // Without this, delete_message events carry a single `message_id`
-      // rather than the `message_ids` array we handle.
-      client_capabilities: { bulk_message_deletion: true },
+      client_capabilities: {
+        // REQUIRED by the server (made mandatory by accident in Zulip 2.x and
+        // kept for compatibility). Leaving it out gets every /register
+        // rejected, which silently took out live events, unread counts and
+        // everything else that arrives with the initial state.
+        notification_settings_null: false,
+        // delete_message events carry `message_ids` instead of a single
+        // `message_id`.
+        bulk_message_deletion: true,
+        // Without this the server never sends typing events for channel
+        // topics, only for DMs.
+        stream_typing_notifications: true,
+      },
     });
     return this.request('/register', {
       method: 'POST',

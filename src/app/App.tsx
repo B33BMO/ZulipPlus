@@ -45,6 +45,7 @@ function AppContent() {
     loadTopics,
     messages,
     renameTopic,
+    connectionError,
   } = useZulip();
 
   // Named so the quote handler's dependency list reads clearly.
@@ -63,6 +64,17 @@ function AppContent() {
     localStorage.getItem('zulipplus_density') === 'comfortable' ? 'comfortable' : 'compact'
   );
   const [resolving, setResolving] = useState(false);
+  // Only surface a connection problem that lasts: a single failed poll that
+  // recovers on the next try isn't worth flashing a banner for.
+  const [showConnectionError, setShowConnectionError] = useState(false);
+  useEffect(() => {
+    if (!connectionError) {
+      setShowConnectionError(false);
+      return;
+    }
+    const t = setTimeout(() => setShowConnectionError(true), 4000);
+    return () => clearTimeout(t);
+  }, [connectionError]);
   // Sorted user IDs of all participants in the active DM/huddle (includes self).
   const [activeDM, setActiveDM] = useState<number[] | null>(null);
   const [activeTopic, setActiveTopic] = useState<{
@@ -572,6 +584,16 @@ function AppContent() {
       />
 
       <main className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+        {showConnectionError && connectionError && (
+          <div
+            role="status"
+            className="shrink-0 flex items-center gap-2 px-6 py-1.5 text-[12px] border-b border-line bg-[color-mix(in_srgb,#d9a23a_14%,transparent)] text-text-primary"
+          >
+            <Loader2 className="size-3.5 animate-spin text-[#d9a23a]" />
+            <span className="font-medium">Can’t reach the server, retrying.</span>
+            <span className="text-text-muted truncate">New messages and unread counts won’t update until this clears. ({connectionError})</span>
+          </div>
+        )}
         {activeSpecial === 'inbox' ? (
           <InboxView onOpenTopic={handleSelectTopic} onOpenDm={handleSelectDM} />
         ) : isMessageView ? (

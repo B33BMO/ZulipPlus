@@ -193,6 +193,11 @@ interface ZulipContextValue {
   markAllAsRead: () => Promise<void>;
   /** Set when cached credentials couldn't be used because the server was unreachable. */
   autoLoginError: string | null;
+  /**
+   * Null while the live event connection is healthy; otherwise the most
+   * recent reason it isn't (registration rejected, network down, …).
+   */
+  connectionError: string | null;
   resolveUrl: (url: string) => string;
   fetchAuthenticatedUrl: (url: string) => Promise<string>;
 }
@@ -238,6 +243,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
   useEffect(() => { hasNewerRef.current = hasNewerMessages; }, [hasNewerMessages]);
   const messageOpenerRef = useRef<((message: ZulipMessage) => void) | null>(null);
   const [autoLoginError, setAutoLoginError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [presenceEnabled, setPresenceEnabled] = useState(true);
   const [giphyApiKey, setGiphyApiKey] = useState('');
   const [realmName, setRealmName] = useState('');
@@ -410,6 +416,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
           } catch (err) {
             if (!alive()) return;
             console.warn('Event queue registration failed; retrying', err);
+            setConnectionError(err instanceof Error ? err.message : String(err));
             await new Promise((r) => setTimeout(r, Math.min(30_000, 2_000 * 2 ** attempt)));
             if (!alive()) return;
           }
@@ -418,6 +425,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
           zApi.deleteEventQueue(reg.queue_id).catch(() => {});
           return;
         }
+        setConnectionError(null);
         queueIdRef.current = reg.queue_id;
         let lastEventId = reg.last_event_id;
         applyRegisterState(reg, myId);
@@ -437,6 +445,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
               poll.signal
             );
             lastPollOkRef.current = Date.now();
+            setConnectionError(null);
             if (!alive()) break;
             for (const event of eventsRes.events) {
               try {
@@ -918,6 +927,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
             // If the queue expired (e.g. after a long sleep / network blip),
             // re-register and continue. Otherwise back off and retry.
             const msg = err instanceof Error ? err.message : String(err ?? '');
+            setConnectionError(msg || 'Connection lost');
             const isBadQueue =
               (err instanceof ZulipApiError && err.code === 'BAD_EVENT_QUEUE_ID') ||
               /Bad event queue id/i.test(msg) ||
@@ -952,6 +962,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
                 continue;
               } catch (reRegErr) {
                 console.error('Failed to re-register event queue', reRegErr);
+                setConnectionError(reRegErr instanceof Error ? reRegErr.message : String(reRegErr));
               }
             }
             await new Promise((r) => setTimeout(r, 5000));
@@ -1208,6 +1219,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
     mentionIdsRef.current.clear();
     setUnreadMentionCount(0);
     setRealmName('');
+    setConnectionError(null);
     setUnreadCounts({ streams: {}, pms: {} });
     setDmConversations([]);
     setRealmEmoji({});
@@ -1765,6 +1777,7 @@ export function ZulipProvider({ children }: { children: ReactNode }) {
         renameTopic,
         markAllAsRead,
         autoLoginError,
+        connectionError,
         resolveUrl,
         fetchAuthenticatedUrl,
       }}
