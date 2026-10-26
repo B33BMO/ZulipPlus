@@ -13,6 +13,8 @@ export interface NotifyOptions {
   icon?: string;
   /** Collapse key — a later notification with the same tag replaces the earlier. */
   tag?: string;
+  /** Called when the user clicks the notification (after the window is focused). */
+  onClick?: () => void;
 }
 
 export interface StoredCredentials {

@@ -12,6 +12,16 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.zulipplus.client');
 }
 
+// Vite copies public/ into dist/, and only dist/ is packaged (see the `files`
+// list in package.json) — so public/ only exists in a dev checkout. Windows
+// gets the multi-size .ico so the taskbar and title bar use hand-rendered
+// 16/24/32px images instead of a downscaled 512px PNG.
+const APP_ICON = path.join(
+  __dirname,
+  isDev ? '../public' : '../dist',
+  process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+);
+
 // Schemes the renderer can navigate to in-app. Anything else is shelled out.
 const APP_ORIGINS = new Set([
   'http://localhost:5173',
@@ -88,7 +98,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'Zulip',
-    icon: path.join(__dirname, '../public/zulip_logo.png'),
+    icon: APP_ICON,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -96,7 +106,7 @@ function createWindow() {
       sandbox: true,
     },
     // Frameless with custom title bar look (Windows)
-    backgroundColor: '#313338',
+    backgroundColor: '#101114',
     show: false,
   });
 
@@ -247,19 +257,38 @@ ipcMain.handle('creds:available', () => {
 });
 
 // Native main-process notification (more reliable on Windows than web Notification).
-ipcMain.handle('show-notification', (_evt, opts: { title: string; body: string; icon?: string }) => {
+// Live notifications. Electron lets a Notification be garbage-collected while
+// it's still on screen, and a collected one silently loses its click handler.
+const liveNotifications = new Set<Notification>();
+
+ipcMain.handle('show-notification', (_evt, opts: { title: string; body: string; icon?: string; id?: string }) => {
   if (!Notification.isSupported()) return false;
   const n = new Notification({
     title: opts.title,
     body: opts.body,
-    icon: opts.icon || path.join(__dirname, '../public/zulip_logo.png'),
+    // Electron only loads icons from disk; a sender's avatar URL would just
+    // produce a blank image, so fall back to the app icon for those.
+    icon: opts.icon && !/^https?:/i.test(opts.icon) ? opts.icon : APP_ICON,
     silent: false,
   });
+  liveNotifications.add(n);
+  // Windows doesn't always emit 'close' once a toast moves to the Action
+  // Center, so cap the set rather than trusting it to drain.
+  if (liveNotifications.size > 50) {
+    const oldest = liveNotifications.values().next().value;
+    if (oldest) liveNotifications.delete(oldest);
+  }
+  const release = () => liveNotifications.delete(n);
+  n.on('close', release);
+  n.on('failed', release);
   n.on('click', () => {
+    release();
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
+      // Let the renderer open the conversation the notification was about.
+      if (typeof opts.id === 'string') mainWindow.webContents.send('notification-click', opts.id);
     }
   });
   n.show();

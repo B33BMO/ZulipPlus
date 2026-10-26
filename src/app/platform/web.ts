@@ -54,6 +54,7 @@ export class WebPlatform implements Platform {
       });
       note.onclick = () => {
         void this.focusWindow();
+        opts.onClick?.();
         note.close();
       };
       return true;

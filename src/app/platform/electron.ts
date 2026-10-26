@@ -20,7 +20,9 @@ export interface ElectronBridge {
   isElectron: true;
   openExternal: (url: string) => Promise<void>;
   focusWindow: () => Promise<void>;
-  showNotification: (opts: { title: string; body: string; icon?: string }) => Promise<boolean>;
+  showNotification: (opts: { title: string; body: string; icon?: string; id?: string }) => Promise<boolean>;
+  /** Absent on older preloads. Returns an unsubscribe function. */
+  onNotificationClick?: (cb: (id: string) => void) => () => void;
   setServerUrl: (url: string) => Promise<void>;
   creds?: ElectronCredsBridge;
 }
@@ -67,12 +69,22 @@ export class ElectronPlatform extends WebPlatform {
   // server directly (which is what the CORS shim in main.cts exists for).
   private readonly directToServer = !import.meta.env.DEV;
 
+  // Click handlers for notifications shown by the main process, keyed by the
+  // id we hand it. Main reports the click back over IPC with that id.
+  private readonly clickHandlers = new Map<string, () => void>();
+  private nextNotificationId = 0;
+
   constructor(private readonly bridge: ElectronBridge) {
     super();
     this.os = bridge.platform || 'unknown';
     this.secureCredentials = bridge.creds
       ? new ElectronCredentialStore(bridge.creds)
       : null;
+    bridge.onNotificationClick?.((id) => {
+      const handler = this.clickHandlers.get(id);
+      this.clickHandlers.delete(id);
+      handler?.();
+    });
   }
 
   async openExternal(url: string): Promise<void> {
@@ -93,12 +105,24 @@ export class ElectronPlatform extends WebPlatform {
     try {
       // Main-process notifications are markedly more reliable on Windows than
       // the renderer's web Notification API.
+      const id = String(++this.nextNotificationId);
+      if (opts.onClick) {
+        this.clickHandlers.set(id, opts.onClick);
+        // Bound the map: handlers for notifications nobody clicked are dead
+        // weight once the OS has long since dismissed them.
+        if (this.clickHandlers.size > 50) {
+          const oldest = this.clickHandlers.keys().next().value;
+          if (oldest !== undefined) this.clickHandlers.delete(oldest);
+        }
+      }
       const shown = await this.bridge.showNotification({
         title: opts.title,
         body: opts.body,
         icon: opts.icon,
+        id,
       });
       if (shown) return true;
+      this.clickHandlers.delete(id);
     } catch {
       // Fall through to the web implementation below.
     }

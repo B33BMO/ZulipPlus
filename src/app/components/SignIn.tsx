@@ -5,12 +5,13 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { useZulip } from '../context/ZulipContext';
 import { loadCredentials } from '../api/credentialStore';
+import { Logo } from './Logo';
 
 const DEFAULT_SERVER =
   import.meta.env.VITE_DEFAULT_ZULIP_SERVER ?? 'https://zulip.cyburity.com';
 
 export function SignIn() {
-  const { login, loading: autoLogging } = useZulip();
+  const { login, loading: autoLogging, autoLoginError } = useZulip();
 
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [email, setEmail] = useState('');
@@ -27,12 +28,16 @@ export function SignIn() {
         if (cancelled || !cached) return;
         setServer((v) => v || cached.server || DEFAULT_SERVER);
         setEmail((v) => v || cached.email || '');
+        // So retrying after an unreachable-server auto-login is one click,
+        // not a trip to Zulip settings for the key.
+        setApiKey((v) => v || cached.apiKey || '');
       })
       .catch(() => { /* no prefill — the form still works */ });
     return () => { cancelled = true; };
   }, []);
 
   const [error, setError] = useState('');
+  const shownError = error || autoLoginError || '';
   const [loading, setLoading] = useState(false);
 
   // If auto-login is in progress, show a loading screen
@@ -74,8 +79,9 @@ export function SignIn() {
         <div className="bg-surface-secondary rounded-lg p-8 shadow-2xl">
           {/* Header */}
           <div className="text-center mb-8">
+            <Logo size={56} className="mx-auto mb-4" />
             <h1 className="text-2xl font-bold text-text-primary mb-2">
-              Welcome to Zulip
+              Welcome to Zulip+
             </h1>
             <p className="text-text-secondary text-sm">
               Sign in to your workspace
@@ -145,9 +151,9 @@ export function SignIn() {
             </div>
 
             {/* Error Message */}
-            {error && (
+            {shownError && (
               <div className="bg-red-500/10 border border-red-500/50 rounded p-3">
-                <p className="text-red-400 text-sm">{error}</p>
+                <p className="text-red-400 text-sm">{shownError}</p>
               </div>
             )}
 

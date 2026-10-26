@@ -93,6 +93,8 @@ export function EditStatusModal({ open, onOpenChange }: EditStatusModalProps) {
       setText('');
       setEmoji(null);
       onOpenChange(false);
+    } catch (err) {
+      console.error('Failed to clear status:', err);
     } finally {
       setSaving(false);
     }
@@ -104,7 +106,7 @@ export function EditStatusModal({ open, onOpenChange }: EditStatusModalProps) {
   };
 
   const renderEmojiDisplay = () => {
-    if (!emoji) return <Smile className="size-5 text-gray-400" />;
+    if (!emoji) return <Smile className="size-5 text-text-secondary" />;
     if (emoji.type === 'realm_emoji') {
       const custom = realmEmoji[emoji.code];
       if (custom) {

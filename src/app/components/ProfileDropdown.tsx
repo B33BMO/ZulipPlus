@@ -31,15 +31,15 @@ export function ProfileDropdown({
   const { currentUser, getUserStatus, resolveUrl, userStatusText, userStatusEmoji, realmEmoji } = useZulip();
 
   const getStatusColor = () => {
-    if (isInvisible || !currentUser) return 'bg-gray-500';
+    if (isInvisible || !currentUser) return 'bg-text-muted';
     const status = getUserStatus(currentUser.user_id);
     switch (status) {
       case 'online':
-        return 'bg-green-500';
+        return 'bg-[#3fb47c]';
       case 'idle':
-        return 'bg-yellow-500';
+        return 'bg-[#d9a23a]';
       case 'offline':
-        return 'bg-gray-500';
+        return 'bg-text-muted';
     }
   };
 
@@ -48,22 +48,36 @@ export function ProfileDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button className="relative">
-          <Avatar className="size-9 cursor-pointer hover:opacity-80 transition-opacity">
-            <AvatarImage
-              src={resolveUrl(currentUser.avatar_url)}
-              alt={currentUser.full_name}
+        <button
+          className="w-full flex items-center gap-2 rounded-md p-1.5 text-left hover:bg-surface-hover outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+          aria-label="Account menu"
+        >
+          <span className="relative shrink-0">
+            <Avatar className="size-7 rounded-md">
+              <AvatarImage
+                src={resolveUrl(currentUser.avatar_url)}
+                alt=""
+              />
+              <AvatarFallback className="rounded-md text-xs">{currentUser.full_name[0]}</AvatarFallback>
+            </Avatar>
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-surface-sidebar ${getStatusColor()}`}
             />
-            <AvatarFallback>{currentUser.full_name[0]}</AvatarFallback>
-          </Avatar>
-          <div
-            className={`absolute bottom-0 right-0 size-3 rounded-full border-2 border-surface-primary ${getStatusColor()}`}
-          />
+          </span>
+          <span className="flex-1 min-w-0">
+            <span className="block text-[13px] font-medium text-text-primary truncate leading-4">
+              {currentUser.full_name}
+            </span>
+            <span className="block text-[11px] text-text-muted truncate leading-4">
+              {isInvisible ? 'Invisible' : userStatusText || 'Set a status'}
+            </span>
+          </span>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        align="end"
-        className="w-56 bg-surface-overlay border-surface-tertiary text-text-primary"
+        align="start"
+        side="top"
+        className="w-60 bg-surface-overlay border-line text-text-primary"
       >
         <div className="px-2 py-3 mb-1">
           <div className="flex items-center gap-2">
@@ -100,16 +114,16 @@ export function ProfileDropdown({
           </div>
         </div>
 
-        <DropdownMenuSeparator className="bg-surface-tertiary" />
+        <DropdownMenuSeparator className="bg-line" />
 
-        <DropdownMenuItem onClick={onEditStatus} className="focus:bg-brand focus:text-white cursor-pointer">
+        <DropdownMenuItem onClick={onEditStatus} className="focus:bg-surface-hover focus:text-text-primary cursor-pointer text-[13px]">
           <User className="size-4 mr-2" />
           Edit Status
         </DropdownMenuItem>
 
         <DropdownMenuItem
           onClick={onToggleInvisible}
-          className="focus:bg-brand focus:text-white cursor-pointer"
+          className="focus:bg-surface-hover focus:text-text-primary cursor-pointer text-[13px]"
         >
           {isInvisible ? (
             <>
@@ -124,11 +138,11 @@ export function ProfileDropdown({
           )}
         </DropdownMenuItem>
 
-        <DropdownMenuSeparator className="bg-surface-tertiary" />
+        <DropdownMenuSeparator className="bg-line" />
 
         <DropdownMenuItem
           onClick={onThemeToggle}
-          className="focus:bg-brand focus:text-white cursor-pointer"
+          className="focus:bg-surface-hover focus:text-text-primary cursor-pointer text-[13px]"
         >
           {theme === 'light' || theme === 'paper' || theme === 'solarized-light' ? (
             <>
@@ -143,16 +157,16 @@ export function ProfileDropdown({
           )}
         </DropdownMenuItem>
 
-        <DropdownMenuItem onClick={onOpenSettings} className="focus:bg-brand focus:text-white cursor-pointer">
+        <DropdownMenuItem onClick={onOpenSettings} className="focus:bg-surface-hover focus:text-text-primary cursor-pointer text-[13px]">
           <Settings className="size-4 mr-2" />
           Settings
         </DropdownMenuItem>
 
-        <DropdownMenuSeparator className="bg-surface-tertiary" />
+        <DropdownMenuSeparator className="bg-line" />
 
         <DropdownMenuItem
           onClick={onLogout}
-          className="focus:bg-red-500 focus:text-white cursor-pointer text-red-400"
+          className="focus:bg-surface-hover focus:text-red-400 cursor-pointer text-red-400 text-[13px]"
         >
           <LogOut className="size-4 mr-2" />
           Logout

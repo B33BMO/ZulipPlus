@@ -1,14 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Hash, User, Users, MessageSquare, Loader2 } from 'lucide-react';
+import { AtSign, Check, ChevronRight, Hash, Loader2, Lock, Search, Star, Undo2, Users } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, type SpecialView } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
 import { RichComposer, type RichComposerHandle } from './components/RichComposer';
 import { ProfileDropdown } from './components/ProfileDropdown';
-import { SearchBar } from './components/SearchBar';
+import { SearchPalette } from './components/SearchPalette';
+import { InboxView } from './components/InboxView';
 import { SignIn } from './components/SignIn';
 import { EditStatusModal } from './components/EditStatusModal';
-import { SettingsModal } from './components/SettingsModal';
+import { SettingsModal, type Density } from './components/SettingsModal';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ZulipProvider, useZulip, dmKey } from './context/ZulipContext';
 import type { ZulipMessage } from './api/types';
@@ -32,9 +33,18 @@ function AppContent() {
     logout,
     loading,
     typingUsers,
-    updateUserStatus,
     getMessageRaw,
     serverUrl,
+    presenceEnabled,
+    setInvisible,
+    unreadCounts,
+    hasNewerMessages,
+    jumpToPresent,
+    setMessageOpener,
+    clearNarrow,
+    loadTopics,
+    messages,
+    renameTopic,
   } = useZulip();
 
   // Named so the quote handler's dependency list reads clearly.
@@ -45,7 +55,14 @@ function AppContent() {
 
   const composerRef = useRef<RichComposerHandle>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [activeView, setActiveView] = useState<'channels' | 'users'>('channels');
+  // Inbox / Mentions / Starred. Exclusive with activeDM and activeTopic;
+  // the app opens on the Inbox.
+  const [activeSpecial, setActiveSpecial] = useState<SpecialView | null>('inbox');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [density, setDensity] = useState<Density>(() =>
+    localStorage.getItem('zulipplus_density') === 'comfortable' ? 'comfortable' : 'compact'
+  );
+  const [resolving, setResolving] = useState(false);
   // Sorted user IDs of all participants in the active DM/huddle (includes self).
   const [activeDM, setActiveDM] = useState<number[] | null>(null);
   const [activeTopic, setActiveTopic] = useState<{
@@ -55,10 +72,12 @@ function AppContent() {
   const [theme, setTheme] = useState<string>(
     () => localStorage.getItem('zulipplus_theme') || 'dark'
   );
-  const [accentColor, setAccentColor] = useState<string>(
-    () => localStorage.getItem('zulipplus_accent') || '#5865f2'
-  );
-  const [isInvisible, setIsInvisible] = useState(false);
+  const [accentColor, setAccentColor] = useState<string>(() => {
+    const saved = localStorage.getItem('zulipplus_accent');
+    // The old Discord-blurple default moves to the new default with the
+    // redesign; a colour the user actually picked is kept.
+    return !saved || saved.toLowerCase() === '#5865f2' ? '#5e6ad2' : saved;
+  });
   const [editStatusOpen, setEditStatusOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -97,10 +116,40 @@ function AppContent() {
     localStorage.setItem('zulipplus_accent', accentColor);
   }, [accentColor]);
 
+  // Unread total in the window title, so it shows on the taskbar entry even
+  // when the window is buried. Muted channels don't count, matching the
+  // sidebar badges.
+  useEffect(() => {
+    const muted = new Set(subscriptions.filter((s) => s.is_muted).map((s) => s.stream_id));
+    let total = 0;
+    for (const [key, n] of Object.entries(unreadCounts.streams)) {
+      if (!muted.has(Number(key.split(':', 1)[0]))) total += n;
+    }
+    for (const n of Object.values(unreadCounts.pms)) total += n;
+    document.title = total > 0 ? `(${total}) Zulip+` : 'Zulip+';
+  }, [unreadCounts, subscriptions]);
+
+  useEffect(() => {
+    localStorage.setItem('zulipplus_density', density);
+  }, [density]);
+
+  // Ctrl/Cmd+K opens search from anywhere, including from inside the composer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const handleLogout = () => {
     logout();
     setActiveDM(null);
     setActiveTopic(null);
+    setActiveSpecial('inbox');
   };
 
   const findUser = useCallback(
@@ -114,13 +163,16 @@ function AppContent() {
   // Track the current navigation to prevent race conditions on rapid switching
   const navIdRef = useRef(0);
 
+  // `anchor` opens the conversation centred on that message instead of at
+  // the newest one (search results, /near/ links, notification clicks).
   const handleSelectDM = useCallback(
-    async (userIds: number[]) => {
+    async (userIds: number[], anchor?: number) => {
       if (!currentUser || userIds.length === 0) return;
       const navId = ++navIdRef.current;
       const sorted = userIds.slice().sort((a, b) => a - b);
       setActiveDM(sorted);
       setActiveTopic(null);
+      setActiveSpecial(null);
       // Narrow operand: comma-separated emails of OTHER participants.
       // Self-DM is the special case where the only participant is current user.
       const others = sorted.filter((id) => id !== currentUser.user_id);
@@ -131,7 +183,7 @@ function AppContent() {
             .filter((e): e is string => !!e)
             .join(',');
       try {
-        await loadMessages([{ operator: 'dm', operand }]);
+        await loadMessages([{ operator: 'dm', operand }], anchor);
       } catch (err) {
         if (navIdRef.current === navId) {
           console.error('Failed to load DM messages:', err);
@@ -145,15 +197,19 @@ function AppContent() {
   );
 
   const handleSelectTopic = useCallback(
-    async (streamId: number, topicName: string) => {
+    async (streamId: number, topicName: string, anchor?: number) => {
       const navId = ++navIdRef.current;
       setActiveTopic({ streamId, topicName });
       setActiveDM(null);
+      setActiveSpecial(null);
       try {
-        await loadMessages([
-          { operator: 'stream', operand: streamId },
-          { operator: 'topic', operand: topicName },
-        ]);
+        await loadMessages(
+          [
+            { operator: 'stream', operand: streamId },
+            { operator: 'topic', operand: topicName },
+          ],
+          anchor
+        );
       } catch (err) {
         if (navIdRef.current === navId) {
           console.error('Failed to load topic messages:', err);
@@ -165,6 +221,96 @@ function AppContent() {
     },
     [loadMessages]
   );
+
+  // Inbox shows no messages; Mentions and Starred are message lists drawn
+  // from every conversation.
+  const handleSelectSpecial = useCallback(
+    async (view: SpecialView) => {
+      const navId = ++navIdRef.current;
+      setActiveSpecial(view);
+      setActiveDM(null);
+      setActiveTopic(null);
+      if (view === 'inbox') {
+        clearNarrow();
+        return;
+      }
+      try {
+        await loadMessages([
+          { operator: 'is', operand: view === 'mentions' ? 'mentioned' : 'starred' },
+        ]);
+      } catch (err) {
+        if (navIdRef.current === navId) {
+          toast.error('Couldn’t load messages', {
+            description: err instanceof Error ? err.message : undefined,
+          });
+        }
+      }
+    },
+    [clearNarrow, loadMessages]
+  );
+
+  // A channel picked from search: open its most recently active topic.
+  const handleOpenChannel = useCallback(
+    async (streamId: number) => {
+      try {
+        const list = await loadTopics(streamId);
+        if (list.length > 0) {
+          handleSelectTopic(streamId, list[0].name);
+        } else {
+          toast('That channel has no topics yet');
+        }
+      } catch (err) {
+        toast.error('Couldn’t load that channel', {
+          description: err instanceof Error ? err.message : undefined,
+        });
+      }
+    },
+    [loadTopics, handleSelectTopic]
+  );
+
+  // Zulip resolves a topic by renaming it with a "✔ " prefix (and unresolves
+  // by removing it). The rename moves every message, so follow it.
+  const RESOLVED_PREFIX = '✔ ';
+  const handleToggleResolved = useCallback(async () => {
+    if (!activeTopic || messages.length === 0) return;
+    const { streamId, topicName } = activeTopic;
+    const resolved = topicName.startsWith(RESOLVED_PREFIX);
+    const next = resolved ? topicName.slice(RESOLVED_PREFIX.length) : RESOLVED_PREFIX + topicName;
+    setResolving(true);
+    try {
+      await renameTopic(messages[messages.length - 1].id, next);
+      loadTopics(streamId).catch(() => {});
+      await handleSelectTopic(streamId, next);
+    } catch (err) {
+      toast.error(resolved ? 'Couldn’t unresolve topic' : 'Couldn’t resolve topic', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setResolving(false);
+    }
+  }, [activeTopic, messages, renameTopic, loadTopics, handleSelectTopic]);
+
+  // Open the conversation a message belongs to, scrolled to that message.
+  const openMessage = useCallback(
+    (message: ZulipMessage) => {
+      if (message.type === 'stream') {
+        if (typeof message.stream_id === 'number') {
+          handleSelectTopic(message.stream_id, message.subject, message.id);
+        }
+      } else if (Array.isArray(message.display_recipient) && currentUser) {
+        const ids = message.display_recipient.map((r) => r.id);
+        if (!ids.includes(currentUser.user_id)) ids.push(currentUser.user_id);
+        handleSelectDM(ids, message.id);
+      }
+    },
+    [handleSelectTopic, handleSelectDM, currentUser]
+  );
+
+  // Notification clicks land here via the context.
+  useEffect(() => {
+    setMessageOpener(openMessage);
+    return () => setMessageOpener(null);
+  }, [setMessageOpener, openMessage]);
 
   const handleSendMessage = useCallback(
     async (content: string) => {
@@ -198,8 +344,11 @@ function AppContent() {
         });
         throw err;
       }
+      // Reading an older stretch of the conversation: the sent message lands
+      // at the present, so go there to see it.
+      if (hasNewerMessages) jumpToPresent().catch(() => {});
     },
-    [activeDM, activeTopic, sendMessage, subscriptions, currentUser]
+    [activeDM, activeTopic, sendMessage, subscriptions, currentUser, hasNewerMessages, jumpToPresent]
   );
 
   const handleFileUpload = useCallback(
@@ -280,197 +429,213 @@ function AppContent() {
 
   // Compact label for the header / placeholder. Self-DM: "<your name>
   // (you)". Solo: "Alice". Small group (≤3): full list. Large group (4+):
-  // "Alice, Bob +N more" — "more" instead of "others" so the count
-  // unambiguously refers to the unshown remainder rather than the total
-  // group size.
+  // "Alice, Bob +N more".
   const dmShortLabel = (userIds: number[]): string => {
-    if (!currentUser) return 'Direct Message';
+    if (!currentUser) return 'Direct message';
     const others = dmOtherNames(userIds);
     if (others.length === 0) return `${currentUser.full_name} (you)`;
     if (others.length <= 3) return others.join(', ');
-    const head = others.slice(0, 2).join(', ');
-    return `${head} +${others.length - 2} more`;
+    return `${others.slice(0, 2).join(', ')} +${others.length - 2} more`;
   };
 
-  // Full participant list, used as a hover tooltip for groups.
-  const dmFullLabel = (userIds: number[]): string => {
-    const others = dmOtherNames(userIds);
-    if (others.length === 0) return '';
-    return others.join(', ');
-  };
+  const activeStream = activeTopic
+    ? subscriptions.find((s) => s.stream_id === activeTopic.streamId)
+    : undefined;
 
-  // Used internally for placeholder; same as dmShortLabel but inline-ready.
-  const dmTitle = dmShortLabel;
+  const headerButton =
+    'flex items-center gap-1.5 h-7 px-2 rounded-md text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary disabled:opacity-50';
 
-  // Get current header info
-  const getHeaderContent = () => {
+  const renderHeader = () => {
     if (activeDM) {
-      const others = currentUser
-        ? activeDM.filter((id) => id !== currentUser.user_id)
-        : activeDM;
-      const isGroup = others.length > 1;
-      const fullList = isGroup ? dmFullLabel(activeDM) : undefined;
+      const others = activeDM.filter((id) => id !== currentUser.user_id);
       return (
         <>
-          {isGroup ? (
-            <Users className="size-5 text-text-secondary shrink-0" />
-          ) : (
-            <User className="size-5 text-text-secondary shrink-0" />
-          )}
-          <h2
-            className="font-semibold text-text-primary truncate min-w-0"
-            title={fullList}
-          >
+          {others.length > 1 && <Users className="size-4 text-text-muted shrink-0" />}
+          <h1 className="m-0 text-[13px] font-semibold text-text-primary truncate" title={dmOtherNames(activeDM).join(', ')}>
             {dmShortLabel(activeDM)}
-          </h2>
+          </h1>
+          {others.length > 1 && (
+            <span className="text-[12px] text-text-muted shrink-0">{others.length + 1} people</span>
+          )}
         </>
       );
     }
     if (activeTopic) {
-      const stream = subscriptions.find(
-        (s) => s.stream_id === activeTopic.streamId
-      );
+      const resolved = activeTopic.topicName.startsWith(RESOLVED_PREFIX);
       return (
         <>
-          <Hash className="size-5 shrink-0" style={{ color: stream?.color || '#888' }} />
-          <h2 className="font-semibold text-text-primary truncate min-w-0">
-            {stream?.name}{' '}
-            <span className="text-text-secondary font-normal">
-              / {activeTopic.topicName}
-            </span>
-          </h2>
+          {activeStream?.invite_only ? (
+            <Lock className="size-3.5 shrink-0" style={{ color: activeStream?.color }} />
+          ) : (
+            <Hash className="size-3.5 shrink-0" style={{ color: activeStream?.color }} />
+          )}
+          <span className="text-[13px] text-text-secondary shrink-0">{activeStream?.name ?? 'Unknown channel'}</span>
+          <ChevronRight className="size-3 text-text-muted shrink-0" />
+          <h1 className="m-0 text-[13px] font-semibold text-text-primary truncate">{activeTopic.topicName}</h1>
+          <div className="ml-auto flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={handleToggleResolved}
+              disabled={resolving || messages.length === 0}
+              className={headerButton}
+            >
+              {resolving ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : resolved ? (
+                <Undo2 className="size-3.5" />
+              ) : (
+                <Check className="size-3.5" />
+              )}
+              {resolved ? 'Unresolve' : 'Resolve'}
+            </button>
+          </div>
         </>
       );
     }
-    return <h2 className="font-semibold text-text-primary">Welcome to Zulip</h2>;
+    if (activeSpecial === 'mentions') {
+      return (
+        <>
+          <AtSign className="size-4 text-text-muted" />
+          <h1 className="m-0 text-[13px] font-semibold text-text-primary">Mentions</h1>
+        </>
+      );
+    }
+    if (activeSpecial === 'starred') {
+      return (
+        <>
+          <Star className="size-4 text-text-muted" />
+          <h1 className="m-0 text-[13px] font-semibold text-text-primary">Starred</h1>
+        </>
+      );
+    }
+    return null;
   };
 
-  // Get typing indicator text — only for the conversation currently open.
-  const getTypingIndicator = () => {
-    if (!activeDM && !activeTopic) return null;
+  // "X is typing…" for the open conversation only.
+  const typingText = (() => {
     const expectedKey = activeDM
       ? `dm:${dmKey(activeDM)}`
       : activeTopic
       ? `stream:${activeTopic.streamId}:${activeTopic.topicName}`
       : null;
     if (!expectedKey) return null;
-    const typing = typingUsers
+    const names = typingUsers
       .filter((t) => t.conversationKey === expectedKey)
-      .map((t) => users.find((u) => u.user_id === t.userId))
-      .filter(Boolean);
-    if (typing.length === 0) return null;
-    const names = typing.map((u) => u!.full_name);
-    if (names.length === 1) return `${names[0]} is typing...`;
-    return `${names.join(', ')} are typing...`;
-  };
+      .map((t) => users.find((u) => u.user_id === t.userId)?.full_name)
+      .filter(Boolean) as string[];
+    if (names.length === 0) return null;
+    return names.length === 1 ? `${names[0]} is typing…` : `${names.join(', ')} are typing…`;
+  })();
 
-  const typingText = getTypingIndicator();
+  const placeholder = activeDM
+    ? `Message ${dmShortLabel(activeDM)}`
+    : activeTopic
+    ? `Message #${activeStream?.name ?? ''} › ${activeTopic.topicName}`
+    : '';
 
-  const getPlaceholder = () => {
-    if (activeDM) {
-      return `Message ${dmTitle(activeDM)}`;
-    }
-    if (activeTopic) {
-      return `Message #${subscriptions.find((s) => s.stream_id === activeTopic.streamId)?.name} > ${activeTopic.topicName}`;
-    }
-    return 'Type a message...';
-  };
+  const isConversation = !!(activeDM || activeTopic);
+  const isMessageView = isConversation || activeSpecial === 'mentions' || activeSpecial === 'starred';
 
   return (
-    <div className="size-full flex flex-col bg-surface-primary">
+    <div className="size-full flex flex-col bg-surface-primary text-text-primary">
       <UpdateBanner />
       <div className="flex-1 flex min-h-0">
-      {/* Sidebar */}
       <Sidebar
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-        activeView={activeView}
-        onViewChange={setActiveView}
         onSelectDM={handleSelectDM}
         onSelectTopic={handleSelectTopic}
+        onSelectSpecial={handleSelectSpecial}
+        onOpenSearch={() => setSearchOpen(true)}
         activeDM={activeDM}
         activeTopic={activeTopic}
-      />
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* Top Bar */}
-        <div className="h-12 border-b border-surface-tertiary px-4 flex items-center justify-between bg-surface-primary flex-shrink-0 gap-3">
-          <div className="flex-1 min-w-0 flex items-center gap-3">
-            {getHeaderContent()}
-          </div>
-
-          {/* Profile Dropdown */}
+        activeSpecial={activeSpecial}
+        footer={
           <ProfileDropdown
             theme={theme}
             onThemeToggle={() => {
               const lightThemes = new Set(['light', 'paper', 'solarized-light']);
               setTheme(lightThemes.has(theme) ? 'dark' : 'light');
             }}
-            isInvisible={isInvisible}
-            onToggleInvisible={async () => {
-              const newState = !isInvisible;
-              setIsInvisible(newState);
-              await updateUserStatus({ away: newState });
+            isInvisible={!presenceEnabled}
+            onToggleInvisible={() => {
+              setInvisible(presenceEnabled).catch((err) => {
+                toast.error('Couldn’t change visibility', {
+                  description: err instanceof Error ? err.message : undefined,
+                });
+              });
             }}
             onEditStatus={() => setEditStatusOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
             onLogout={handleLogout}
           />
-        </div>
+        }
+      />
 
-        {/* Search Bar */}
-        <SearchBar
-          onNavigateToStream={handleSelectTopic}
-          onNavigateToDm={handleSelectDM}
-        />
-
-        {/* Messages Area */}
-        {activeDM || activeTopic ? (
+      <main className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+        {activeSpecial === 'inbox' ? (
+          <InboxView onOpenTopic={handleSelectTopic} onOpenDm={handleSelectDM} />
+        ) : isMessageView ? (
           <>
+            <header className="h-12 shrink-0 border-b border-line pl-6 pr-3 flex items-center gap-2 min-w-0">
+              {renderHeader()}
+              {!activeTopic && (
+                <button
+                  onClick={() => setSearchOpen(true)}
+                  aria-label="Search"
+                  className="ml-auto size-7 rounded-md flex items-center justify-center text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+                >
+                  <Search className="size-4" />
+                </button>
+              )}
+            </header>
+
             {loading ? (
               <div className="flex-1 flex items-center justify-center">
-                <Loader2 className="size-8 text-text-secondary animate-spin" />
+                <Loader2 className="size-6 text-text-muted animate-spin" />
               </div>
             ) : (
-              <MessageList onQuote={handleQuote} />
+              <MessageList
+                density={density}
+                showRecipients={!isConversation}
+                onOpenMessage={openMessage}
+                onQuote={isConversation ? handleQuote : undefined}
+                onNavigateToTopic={handleSelectTopic}
+                onNavigateToDm={handleSelectDM}
+              />
             )}
-            {typingText && (
-              <div className="px-4 py-1">
-                <span className="text-xs text-text-secondary italic">
-                  {typingText}
-                </span>
-              </div>
-            )}
-            <RichComposer
-              key={`composer-${activeDM ? dmKey(activeDM) : ''}-${activeTopic?.streamId || ''}-${activeTopic?.topicName || ''}`}
-              ref={composerRef}
-              onSendMessage={handleSendMessage}
-              onFileUpload={handleFileUpload}
-              placeholder={getPlaceholder()}
-              typingRecipients={
-                activeDM && currentUser
-                  ? activeDM.filter((id) => id !== currentUser.user_id)
-                  : null
-              }
-            />
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <MessageSquare className="size-16 text-text-muted mx-auto mb-4" />
-              <h3 className="text-2xl font-semibold text-text-primary mb-2">
-                Welcome to Zulip
-              </h3>
-              <p className="text-text-secondary">
-                Select a channel or user from the sidebar to start chatting
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
 
-      {/* Modals */}
+            {isConversation && (
+              <>
+                <div className="h-[18px] px-7 text-[11px] text-text-muted truncate" aria-live="polite">
+                  {typingText}
+                </div>
+                <RichComposer
+                  key={`composer-${activeDM ? dmKey(activeDM) : ''}-${activeTopic?.streamId || ''}-${activeTopic?.topicName || ''}`}
+                  ref={composerRef}
+                  onSendMessage={handleSendMessage}
+                  onFileUpload={handleFileUpload}
+                  placeholder={placeholder}
+                  typingTarget={
+                    activeDM
+                      ? { type: 'direct', to: activeDM.filter((id) => id !== currentUser.user_id) }
+                      : activeTopic
+                      ? { type: 'stream', streamId: activeTopic.streamId, topic: activeTopic.topicName }
+                      : null
+                  }
+                />
+              </>
+            )}
+          </>
+        ) : null}
+      </main>
+
+      <SearchPalette
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onOpenMessage={openMessage}
+        onOpenDm={handleSelectDM}
+        onOpenChannel={handleOpenChannel}
+      />
       <EditStatusModal open={editStatusOpen} onOpenChange={setEditStatusOpen} />
       <SettingsModal
         open={settingsOpen}
@@ -479,6 +644,8 @@ function AppContent() {
         onThemeChange={setTheme}
         accentColor={accentColor}
         onAccentChange={setAccentColor}
+        density={density}
+        onDensityChange={setDensity}
         onLogout={handleLogout}
       />
       <Toaster

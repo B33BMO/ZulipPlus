@@ -11,6 +11,7 @@ import type {
   GetEventsResponse,
   UpdateMessageFlagsResponse,
   GetPresenceResponse,
+  TypingTarget,
 } from './types';
 import { platform } from '../platform';
 
@@ -21,6 +22,21 @@ function toBase64(value: string): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+// Carries the HTTP status and Zulip's machine-readable `code` (e.g.
+// BAD_EVENT_QUEUE_ID, UNAUTHORIZED) so callers can branch on them instead of
+// pattern-matching human-readable messages.
+export class ZulipApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = 'ZulipApiError';
+  }
+}
+
+/** True when the server rejected the credentials themselves, as opposed to being unreachable. */
+export function isAuthError(err: unknown): boolean {
+  return err instanceof ZulipApiError && (err.status === 401 || err.status === 403);
 }
 
 export class ZulipApi {
@@ -51,8 +67,10 @@ export class ZulipApi {
 
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new Error(
-        body.msg || `API error: ${response.status} ${response.statusText}`
+      throw new ZulipApiError(
+        body.msg || `API error: ${response.status} ${response.statusText}`,
+        response.status,
+        typeof body.code === 'string' ? body.code : undefined
       );
     }
 
@@ -175,7 +193,12 @@ export class ZulipApi {
 
   async editMessage(
     messageId: number,
-    params: { content?: string; topic?: string }
+    params: {
+      content?: string;
+      topic?: string;
+      /** For topic edits: 'change_all' moves the whole topic, not just this message. */
+      propagate_mode?: 'change_one' | 'change_later' | 'change_all';
+    }
   ): Promise<{ result: string; msg: string }> {
     const body = this.encodeParams(params);
     return this.request(`/messages/${messageId}`, {
@@ -226,6 +249,12 @@ export class ZulipApi {
     });
   }
 
+  // Marks every message read. The server answers with an
+  // update_message_flags `all` event, which clears the local badges.
+  async markAllAsRead(): Promise<{ result: string; msg: string }> {
+    return this.request('/mark_all_as_read', { method: 'POST' });
+  }
+
   // ── Message Flags (read, starred, etc.) ───────────────
   async updateMessageFlags(params: {
     messages: number[];
@@ -245,18 +274,16 @@ export class ZulipApi {
   }
 
   // ── Typing ────────────────────────────────────────────
-  async sendTypingNotification(params: {
-    op: 'start' | 'stop';
-    to: number[];
-    type?: 'direct' | 'stream';
-    topic?: string;
-  }): Promise<{ result: string; msg: string }> {
-    const body = this.encodeParams({
-      op: params.op,
-      to: params.to,
-      type: params.type ?? 'direct',
-      topic: params.topic,
-    });
+  // DMs address users by id; channel typing (Zulip 8.0+) addresses one
+  // topic by stream_id + topic.
+  async sendTypingNotification(
+    params: { op: 'start' | 'stop' } & TypingTarget
+  ): Promise<{ result: string; msg: string }> {
+    const body = this.encodeParams(
+      params.type === 'stream'
+        ? { op: params.op, type: 'stream', stream_id: params.streamId, topic: params.topic }
+        : { op: params.op, type: 'direct', to: params.to }
+    );
     return this.request('/typing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -281,21 +308,33 @@ export class ZulipApi {
     all_public_streams?: boolean;
     fetch_event_types?: string[];
   }): Promise<RegisterEventQueueResponse> {
+    const eventTypes = params?.event_types ?? [
+      'message',
+      'update_message',
+      'delete_message',
+      'reaction',
+      'presence',
+      'stream',
+      'subscription',
+      'typing',
+      'update_message_flags',
+      'user_status',
+    ];
     const body = this.encodeParams({
-      event_types: params?.event_types ?? [
-        'message',
-        'update_message',
-        'delete_message',
-        'reaction',
-        'presence',
-        'stream',
-        'subscription',
-        'typing',
-        'update_message_flags',
+      event_types: eventTypes,
+      // Initial state we read but don't need live events for: our own
+      // status/invisible setting, and the realm's GIPHY key.
+      fetch_event_types: params?.fetch_event_types ?? [
+        ...eventTypes,
+        'user_settings',
+        'realm',
       ],
       all_public_streams: params?.all_public_streams ?? false,
       apply_markdown: true,
       client_gravatar: false,
+      // Without this, delete_message events carry a single `message_id`
+      // rather than the `message_ids` array we handle.
+      client_capabilities: { bulk_message_deletion: true },
     });
     return this.request('/register', {
       method: 'POST',
@@ -306,13 +345,14 @@ export class ZulipApi {
 
   async getEvents(
     queueId: string,
-    lastEventId: number
+    lastEventId: number,
+    signal?: AbortSignal
   ): Promise<GetEventsResponse> {
     const query = this.encodeParams({
       queue_id: queueId,
       last_event_id: lastEventId,
     });
-    return this.request(`/events?${query}`);
+    return this.request(`/events?${query}`, { signal });
   }
 
   async deleteEventQueue(
@@ -337,6 +377,18 @@ export class ZulipApi {
     const body = this.encodeParams(params);
     return this.request('/users/me/status', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  }
+
+  // ── User Settings ─────────────────────────────────────
+  async updateSettings(
+    params: Record<string, string | number | boolean>
+  ): Promise<{ result: string; msg: string }> {
+    const body = this.encodeParams(params);
+    return this.request('/settings', {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
     });

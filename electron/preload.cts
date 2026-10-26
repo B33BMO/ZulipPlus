@@ -10,8 +10,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isElectron: true,
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   focusWindow: () => ipcRenderer.invoke('focus-window'),
-  showNotification: (opts: { title: string; body: string; icon?: string }) =>
+  showNotification: (opts: { title: string; body: string; icon?: string; id?: string }) =>
     ipcRenderer.invoke('show-notification', opts),
+  onNotificationClick: (cb: (id: string) => void) => {
+    const listener = (_evt: unknown, id: string) => cb(id);
+    ipcRenderer.on('notification-click', listener);
+    return () => ipcRenderer.removeListener('notification-click', listener);
+  },
   setServerUrl: (url: string) => ipcRenderer.invoke('set-server-url', url),
   creds: {
     available: (): Promise<boolean> => ipcRenderer.invoke('creds:available'),

@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_DEFAULT_ZULIP_SERVER?: string;
   /** Dev-only proxy target; consumed by vite.config.ts, not the app. */
   readonly VITE_DEV_ZULIP_TARGET?: string;
+  /** GIPHY key for the GIF picker. Falls back to the Zulip server's own key. */
+  readonly VITE_GIPHY_API_KEY?: string;
 }
 
 interface ImportMeta {

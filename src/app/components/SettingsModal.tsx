@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { Button } from './ui/button';
@@ -12,11 +12,20 @@ interface SettingsModalProps {
   onThemeChange: (theme: string) => void;
   accentColor: string;
   onAccentChange: (color: string) => void;
+  density: Density;
+  onDensityChange: (density: Density) => void;
   onLogout: () => void;
 }
 
+export type Density = 'compact' | 'comfortable';
+
+const DENSITY_OPTIONS: { id: Density; name: string; hint: string }[] = [
+  { id: 'compact', name: 'Compact', hint: 'Timestamps in a gutter, no avatars. More on screen.' },
+  { id: 'comfortable', name: 'Comfortable', hint: 'Avatars and a little more room between people.' },
+];
+
 const ACCENT_PRESETS = [
-  { color: '#5865f2', name: 'Blurple' },
+  { color: '#5e6ad2', name: 'Indigo' },
   { color: '#57f287', name: 'Green' },
   { color: '#fee75c', name: 'Yellow' },
   { color: '#ed4245', name: 'Red' },
@@ -34,8 +43,8 @@ const THEME_PRESETS: {
   name: string;
   swatch: { bg: string; surface: string; text: string; accent: string };
 }[] = [
-  { id: 'dark',            name: 'Dark',            swatch: { bg: '#313338', surface: '#2b2d31', text: '#f2f3f5', accent: '#5865f2' } },
-  { id: 'light',           name: 'Light',           swatch: { bg: '#ffffff', surface: '#f2f3f5', text: '#060607', accent: '#5865f2' } },
+  { id: 'dark',            name: 'Dark',            swatch: { bg: '#101114', surface: '#0b0c0e', text: '#e8eaed', accent: '#5e6ad2' } },
+  { id: 'light',           name: 'Light',           swatch: { bg: '#ffffff', surface: '#f6f7f9', text: '#15171a', accent: '#5e6ad2' } },
   { id: 'paper',           name: 'Paper',           swatch: { bg: '#ffffff', surface: '#f5f5f5', text: '#000000', accent: '#0050d8' } },
   { id: 'ink',             name: 'Ink',             swatch: { bg: '#000000', surface: '#0a0a0a', text: '#ffffff', accent: '#7cc5ff' } },
   { id: 'dracula',         name: 'Dracula',         swatch: { bg: '#282a36', surface: '#21222c', text: '#f8f8f2', accent: '#bd93f9' } },
@@ -57,11 +66,18 @@ export function SettingsModal({
   onThemeChange,
   accentColor,
   onAccentChange,
+  density,
+  onDensityChange,
   onLogout,
 }: SettingsModalProps) {
   const { currentUser, resolveUrl, serverUrl } = useZulip();
   const [activeSection, setActiveSection] = useState<Section>('appearance');
   const [customHex, setCustomHex] = useState(accentColor);
+  // Re-seed the hex field on open so a half-typed value from last time
+  // doesn't linger next to the real accent.
+  useEffect(() => {
+    if (open) setCustomHex(accentColor);
+  }, [open, accentColor]);
 
   const handleCustomHex = (hex: string) => {
     setCustomHex(hex);
@@ -165,6 +181,32 @@ export function SettingsModal({
                   </div>
                 </div>
 
+                {/* Message density */}
+                <div>
+                  <label className="text-sm font-medium text-text-secondary mb-3 block">Message density</label>
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Message density">
+                    {DENSITY_OPTIONS.map((d) => {
+                      const active = density === d.id;
+                      return (
+                        <button
+                          key={d.id}
+                          role="radio"
+                          aria-checked={active}
+                          onClick={() => onDensityChange(d.id)}
+                          className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                            active ? 'border-brand' : 'border-line hover:border-text-muted'
+                          }`}
+                        >
+                          <div className={`text-sm font-medium ${active ? 'text-brand' : 'text-text-primary'}`}>
+                            {d.name}
+                          </div>
+                          <div className="text-xs text-text-muted mt-0.5">{d.hint}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Accent color */}
                 <div>
                   <label className="text-sm font-medium text-text-secondary mb-3 block">Accent Color</label>
@@ -197,7 +239,7 @@ export function SettingsModal({
                       type="text"
                       value={customHex}
                       onChange={(e) => handleCustomHex(e.target.value)}
-                      placeholder="#5865f2"
+                      placeholder="#5e6ad2"
                       className="h-8 px-3 rounded-md bg-surface-tertiary border border-surface-hover text-text-primary text-sm outline-none focus:ring-1 focus:ring-brand w-28 font-mono"
                     />
                     <span className="text-xs text-text-muted">Custom hex</span>
