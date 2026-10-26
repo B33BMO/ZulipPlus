@@ -323,11 +323,13 @@ export class ZulipApi {
     const body = this.encodeParams({
       event_types: eventTypes,
       // Initial state we read but don't need live events for: our own
-      // status/invisible setting, and the realm's GIPHY key.
+      // invisible setting, the realm name, and the GIPHY key, which Zulip
+      // sends under its own 'giphy' type (not 'realm') since at least 6.0.
       fetch_event_types: params?.fetch_event_types ?? [
         ...eventTypes,
         'user_settings',
         'realm',
+        'giphy',
       ],
       all_public_streams: params?.all_public_streams ?? false,
       apply_markdown: true,

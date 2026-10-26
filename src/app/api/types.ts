@@ -185,7 +185,7 @@ export interface RegisterEventQueueResponse {
   user_settings?: { presence_enabled?: boolean };
   /** Pre-5.0 servers return this at the top level instead. */
   presence_enabled?: boolean;
-  /** From fetch_event_types 'realm'. Empty string when GIPHY isn't configured. */
+  /** From fetch_event_types 'giphy'. Empty string when GIPHY isn't configured. */
   giphy_api_key?: string;
   /** From fetch_event_types 'realm': the organization's display name. */
   realm_name?: string;
