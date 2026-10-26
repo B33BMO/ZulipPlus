@@ -8,14 +8,21 @@ interface GifPickerProps {
   onSelect: (url: string, altText: string) => void;
 }
 
+interface GiphyRendition {
+  url: string;
+  width: string;
+  height: string;
+  mp4?: string;
+}
+
 interface GiphyGif {
   id: string;
   title: string;
   images: {
-    fixed_height: { url: string; width: string; height: string };
-    fixed_height_small: { url: string; width: string; height: string };
+    fixed_width: GiphyRendition;
+    fixed_width_still?: { url: string };
     original: { url: string };
-    downsized: { url: string };
+    downsized?: { url: string };
   };
 }
 
@@ -135,25 +142,51 @@ export function GifPicker({ onSelect }: GifPickerProps) {
           </div>
         ) : (
           <div className="columns-2 gap-1.5">
-            {displayGifs.map((gif) => (
-              <button
-                key={gif.id}
-                onClick={() =>
-                  onSelect(
-                    gif.images.downsized?.url || gif.images.original.url,
-                    gif.title || 'GIF'
-                  )
-                }
-                className="mb-1.5 w-full rounded overflow-hidden hover:ring-2 hover:ring-brand cursor-pointer break-inside-avoid"
-              >
-                <img
-                  src={gif.images.fixed_height_small.url}
-                  alt={gif.title}
-                  className="w-full h-auto"
-                  loading="lazy"
-                />
-              </button>
-            ))}
+            {displayGifs.map((gif) => {
+              const r = gif.images.fixed_width;
+              const w = Number(r.width) || 200;
+              const h = Number(r.height) || 150;
+              return (
+                <button
+                  key={gif.id}
+                  onClick={() =>
+                    onSelect(
+                      gif.images.downsized?.url || gif.images.original.url,
+                      gif.title || 'GIF'
+                    )
+                  }
+                  aria-label={gif.title || 'GIF'}
+                  // Size reserved from GIPHY's dimensions, so tiles don't
+                  // reflow the whole column layout as they load.
+                  style={{ aspectRatio: `${w} / ${h}` }}
+                  className="mb-1.5 w-full rounded overflow-hidden bg-surface-tertiary hover:ring-2 hover:ring-brand cursor-pointer break-inside-avoid block"
+                >
+                  {/* Previews play as MP4, not GIF: twenty animated GIFs are
+                      decoded frame-by-frame on the CPU and made scrolling
+                      crawl, while video decodes on the GPU and Chromium
+                      pauses muted videos that are scrolled out of view. */}
+                  {r.mp4 ? (
+                    <video
+                      src={r.mp4}
+                      poster={gif.images.fixed_width_still?.url}
+                      autoPlay
+                      loop
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover pointer-events-none"
+                    />
+                  ) : (
+                    <img
+                      src={r.url}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover"
+                    />
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
